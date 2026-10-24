@@ -1,5 +1,8 @@
 # buntalk
 
+> [!WARNING]
+>此项目未准备好用于生产环境，请勿直接拿去用于搭建网站！
+
 一个跑在 [Bun](https://bun.sh) + [Hono](https://hono.dev) 上的论坛框架，前端用
 Vue 3 + Vite，组件基于 [Reka UI](https://reka-ui.com)，同一套代码可运行在
 **SQLite / PostgreSQL / MySQL** 之上。
