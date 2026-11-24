@@ -52,8 +52,24 @@ const tags = (await repo.listTags()).map((t) => t.name)
 const settings = await repo.getSettings()
 
 // The single row updates in place rather than accumulating rows.
-await repo.saveSettings({ siteName: '改个名', siteDescription: '', siteNotice: '', siteFooter: '' })
-await repo.saveSettings({ siteName: '再改', siteDescription: 'x', siteNotice: '', siteFooter: '' })
+await repo.saveSettings({
+  siteName: '改个名',
+  siteDescription: '',
+  siteNotice: '',
+  siteFooter: '',
+  dmMinCredit: 0,
+  creditMax: 1000,
+  creditRecoverMinutes: 0,
+})
+await repo.saveSettings({
+  siteName: '再改',
+  siteDescription: 'x',
+  siteNotice: '',
+  siteFooter: '',
+  dmMinCredit: 0,
+  creditMax: 1000,
+  creditRecoverMinutes: 0,
+})
 const updatedSettings = await repo.getSettings()
 
 const after = await status()

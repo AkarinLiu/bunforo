@@ -42,6 +42,7 @@ export const userGroups = mysqlTable('user_groups', {
   name: varchar('name', { length: 191 }).notNull().unique(),
   color: varchar('color', { length: 7 }).notNull(),
   position: int('position').notNull(),
+  builtin: boolean('builtin').notNull().default(false),
 })
 
 export const categories = mysqlTable('categories', {
@@ -127,6 +128,42 @@ export const dmMessages = mysqlTable('dm_messages', {
   createdAt: varchar('created_at', { length: 40 }).notNull(),
 })
 
+export const userBlocks = mysqlTable('user_blocks', {
+  blockerId: int('blocker_id').notNull(),
+  blockedId: int('blocked_id').notNull(),
+  createdAt: varchar('created_at', { length: 40 }).notNull(),
+})
+
+export const userWarnings = mysqlTable('user_warnings', {
+  id: int('id').autoincrement().primaryKey(),
+  userId: int('user_id').notNull(),
+  adminId: int('admin_id'),
+  reason: text('reason').notNull(),
+  createdAt: varchar('created_at', { length: 40 }).notNull(),
+})
+
+export const notifications = mysqlTable('notifications', {
+  id: int('id').autoincrement().primaryKey(),
+  userId: int('user_id').notNull(),
+  type: varchar('type', { length: 32 }).notNull(),
+  actorId: int('actor_id'),
+  threadId: int('thread_id'),
+  postId: int('post_id'),
+  dmThreadId: int('dm_thread_id'),
+  body: text('body').notNull(),
+  excerpt: varchar('excerpt', { length: 500 }).notNull(),
+  readAt: varchar('read_at', { length: 40 }),
+  createdAt: varchar('created_at', { length: 40 }).notNull(),
+})
+
+export const userSettings = mysqlTable('user_settings', {
+  userId: int('user_id').primaryKey(),
+  notifyReply: boolean('notify_reply').notNull(),
+  notifyMention: boolean('notify_mention').notNull(),
+  notifyLike: boolean('notify_like').notNull(),
+  notifyDm: boolean('notify_dm').notNull(),
+})
+
 // Single row (id = 1); the DDL pins that with a CHECK constraint.
 export const settings = mysqlTable('settings', {
   id: int('id').primaryKey(),
@@ -134,6 +171,9 @@ export const settings = mysqlTable('settings', {
   siteDescription: varchar('site_description', { length: 500 }).notNull(),
   siteNotice: varchar('site_notice', { length: 2000 }).notNull(),
   siteFooter: varchar('site_footer', { length: 500 }).notNull(),
+  dmMinCredit: int('dm_min_credit').notNull().default(0),
+  creditMax: int('credit_max').notNull().default(1000),
+  creditRecoverMinutes: int('credit_recover_minutes').notNull().default(0),
 })
 
 export const reportReasons = mysqlTable('report_reasons', {

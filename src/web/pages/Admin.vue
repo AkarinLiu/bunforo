@@ -29,7 +29,6 @@ import type {
   CategoryRow,
   ReportReasonRow,
   ReportRow,
-  Role,
   SettingsRow,
   TagRow,
   ThreadRow,
@@ -38,6 +37,7 @@ import type {
 import { auth } from '../store'
 import { setup } from '../setup'
 import BanDialog from '../components/BanDialog.vue'
+import WarnDialog from '../components/WarnDialog.vue'
 import UserAvatar from '../components/UserAvatar.vue'
 
 const router = useRouter()
@@ -66,6 +66,10 @@ const groupForm = ref<{ id: number; name: string; color: string; position: numbe
   position: 0,
 })
 const groupDeleting = ref<UserGroupRow | null>(null)
+// The built-in group may change colour/position but never its name.
+const editingBuiltin = computed(
+  () => groups.value.find((g) => g.id === groupForm.value.id)?.builtin === true,
+)
 
 const reports = ref<ReportRow[]>([])
 const reportReasons = ref<ReportReasonRow[]>([])
@@ -77,11 +81,15 @@ const settings = ref<SettingsRow>({
   siteDescription: '',
   siteNotice: '',
   siteFooter: '',
+  dmMinCredit: 0,
+  creditMax: 1000,
+  creditRecoverMinutes: 0,
 })
 const savingSettings = ref(false)
 const settingsNotice = ref('')
 const settingsError = ref('')
 const banTarget = ref<{ id: number; displayName: string } | null>(null)
+const warnTarget = ref<{ id: number; displayName: string; warningCount: number } | null>(null)
 const banReasonHint = ref('')
 
 const mail = ref<{ configured: boolean; from: string }>({ configured: false, from: '' })
@@ -130,6 +138,9 @@ async function loadAll(): Promise<void> {
       siteDescription: st.siteDescription,
       siteNotice: st.siteNotice,
       siteFooter: st.siteFooter,
+      dmMinCredit: st.dmMinCredit,
+      creditMax: st.creditMax,
+      creditRecoverMinutes: st.creditRecoverMinutes,
     }
     reportReasons.value = rr
   } catch (err) {
@@ -413,6 +424,11 @@ async function adjustCredit(user: UserRowWithCount, delta: number): Promise<void
   }
 }
 
+function onWarned(): void {
+  warnTarget.value = null
+  void loadAll()
+}
+
 function onBanned(): void {
   const id = banTarget.value?.id
   banTarget.value = null
@@ -420,20 +436,6 @@ function onBanned(): void {
   const row = users.value.find((u) => u.id === id)
   if (row) row.banned = true
   void loadAll()
-}
-
-async function toggleRole(user: UserRowWithCount): Promise<void> {
-  if (user.id === auth.user?.id) {
-    error.value = '不能修改自己的角色'
-    return
-  }
-  const role: Role = user.role === 'admin' ? 'user' : 'admin'
-  try {
-    await http.patch(`/admin/users/${user.id}`, { role })
-    user.role = role
-  } catch (err) {
-    error.value = errMessage(err)
-  }
 }
 
 function openEditUser(user: UserRowWithCount): void {
@@ -608,6 +610,7 @@ const parentName = (cat: CategoryRow): string =>
                 <span v-if="user.id < 0" class="pill pill-accent">系统</span>
                 <span v-else-if="user.role === 'admin'" class="pill pill-accent">管理员</span>
                 <span v-if="user.banned" class="pill pill-danger">已封禁</span>
+                <span v-if="user.warningCount" class="pill">警告 {{ user.warningCount }}</span>
                 <span class="faint" style="font-size: 13px">@{{ user.username }}</span>
               </div>
 
@@ -638,13 +641,8 @@ const parentName = (cat: CategoryRow): string =>
             <div class="user-actions">
               <button class="btn btn-sm" type="button" @click="openEditUser(user)">编辑资料</button>
               <template v-if="user.id > 0">
-                <button
-                  class="btn btn-sm"
-                  type="button"
-                  :disabled="user.id === auth.user?.id"
-                  @click="toggleRole(user)"
-                >
-                  {{ user.role === 'admin' ? '降为用户' : '设为管理员' }}
+                <button class="btn btn-sm" type="button" @click="warnTarget = { id: user.id, displayName: user.displayName, warningCount: user.warningCount }">
+                  警告
                 </button>
                 <button class="btn btn-sm" type="button" @click="adjustCredit(user, -10)">
                   信用 -10
@@ -831,6 +829,7 @@ const parentName = (cat: CategoryRow): string =>
                   <span class="group-badge" :style="{ color: group.color, borderColor: group.color }">
                     {{ group.name }}
                   </span>
+                  <span v-if="group.builtin" class="pill" style="margin-left: 8px">内置</span>
                 </td>
                 <td class="mono faint">{{ group.color }}</td>
                 <td class="mono">{{ group.memberCount ?? 0 }}</td>
@@ -841,6 +840,7 @@ const parentName = (cat: CategoryRow): string =>
                       编辑
                     </button>
                     <button
+                      v-if="!group.builtin"
                       class="btn btn-danger btn-sm"
                       type="button"
                       @click="groupDeleting = group"
@@ -1043,6 +1043,32 @@ const parentName = (cat: CategoryRow): string =>
                 placeholder="留空则不显示"
               />
             </label>
+            <label class="field">
+              <span>私信信用分门槛</span>
+              <input v-model.number="settings.dmMinCredit" type="number" min="0" max="1000" />
+              <span class="faint" style="font-size: 12px">
+                低于该分数的账号不能发起或发送私信；0 表示不限制，管理员与被封禁账号不受限制。
+              </span>
+            </label>
+            <label class="field">
+              <span>信用分上限</span>
+              <input v-model.number="settings.creditMax" type="number" min="0" max="100000" />
+              <span class="faint" style="font-size: 12px">
+                信用分增加时不会超过该值；0 表示不限制。已高于上限的账号保持原分数，扣分仍然生效。
+              </span>
+            </label>
+            <label class="field">
+              <span>信用分自动恢复</span>
+              <input
+                v-model.number="settings.creditRecoverMinutes"
+                type="number"
+                min="0"
+                max="10080"
+              />
+              <span class="faint" style="font-size: 12px">
+                每隔这么多分钟，所有低于上限的账号 +1 分；0 表示关闭。服务重启会重新计时。
+              </span>
+            </label>
             <div style="display: flex; justify-content: flex-end">
               <button class="btn btn-primary" type="submit" :disabled="savingSettings">
                 {{ savingSettings ? '保存中…' : '保存' }}
@@ -1152,7 +1178,10 @@ const parentName = (cat: CategoryRow): string =>
           <form @submit.prevent="saveGroup">
             <label class="field">
               <span>名称</span>
-              <input v-model="groupForm.name" type="text" maxlength="20" required />
+              <input v-model="groupForm.name" type="text" maxlength="20" :disabled="editingBuiltin" required />
+              <span v-if="editingBuiltin" class="faint" style="font-size: 12px">
+                内置管理员用户组的名称不可修改
+              </span>
             </label>
             <label class="field">
               <span>颜色</span>
@@ -1233,6 +1262,15 @@ const parentName = (cat: CategoryRow): string =>
       :default-reason="banReasonHint"
       @close="banTarget = null"
       @done="onBanned"
+    />
+
+    <WarnDialog
+      :open="warnTarget !== null"
+      :user-id="warnTarget?.id ?? 0"
+      :display-name="warnTarget?.displayName ?? ''"
+      :warning-count="warnTarget?.warningCount ?? 0"
+      @close="warnTarget = null"
+      @done="onWarned"
     />
   </div>
 </template>

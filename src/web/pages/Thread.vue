@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { SwitchRoot, SwitchThumb } from 'reka-ui'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { errMessage, http } from '../api'
 import type { LikeResponse, ThreadDetailResponse } from '../api'
@@ -10,6 +10,7 @@ import MarkdownEditor from '../components/MarkdownEditor.vue'
 import PostItem from '../components/PostItem.vue'
 import ReportDialog from '../components/ReportDialog.vue'
 import TagList from '../components/TagList.vue'
+import { onLiveEvent } from '../events'
 import { buildPostTree } from '../postTree'
 import { auth } from '../store'
 
@@ -57,6 +58,20 @@ watch(
   () => props.id,
   () => void load().then(recordView),
 )
+
+// A reply from someone else lands without a reload; the id check makes this
+// idempotent when the same post also arrives through our own refresh.
+const offLive = onLiveEvent('thread:post', (data) => {
+  const payload = data as { threadId: number; post: PostRow }
+  if (!payload?.post || Number(props.id) !== Number(payload.threadId)) return
+  if (posts.value.some((p) => p.id === payload.post.id)) return
+  posts.value.push(payload.post)
+  if (thread.value) {
+    thread.value.lastPostAt = payload.post.createdAt
+    thread.value.postCount = (thread.value.postCount ?? posts.value.length) + 1
+  }
+})
+onUnmounted(offLive)
 
 /**
  * View beacon: fires once per page open, after the detail load so the shown
@@ -252,7 +267,11 @@ const time = (iso: string) => iso.replace('T', ' ').slice(0, 16)
         />
       </div>
 
-      <section v-if="auth.user" class="card card-pad" style="margin-top: 20px">
+      <section v-if="auth.user?.banned" class="card card-pad" style="margin-top: 20px">
+        <p class="form-error" style="margin: 0">账号已被封禁，暂时无法回复或发帖。</p>
+      </section>
+
+      <section v-else-if="auth.user" class="card card-pad" style="margin-top: 20px">
         <div class="toolbar" style="margin-bottom: 12px">
           <h3>{{ replyTarget ? `回复 #${replyTarget}` : '回复主题' }}</h3>
           <span class="spacer"></span>

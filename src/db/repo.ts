@@ -11,11 +11,12 @@
  * a runtime SQL error rather than a compile error — the domain types in
  * `types.ts` are what keeps callers honest.
  */
-import { and, asc, count, desc, eq, gt, inArray, like, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gt, inArray, isNull, like, ne, or, sql } from 'drizzle-orm'
 import { db, dialect, tables as t } from './index'
 import { SYSTEM_USER_ID, SYSTEM_USERNAME, toPublicUser } from '../shared/types'
 import type {
   AdminUser,
+  BlockedUser,
   CategoryRow,
   DmMessageRow,
   DmThreadRow,
@@ -23,6 +24,8 @@ import type {
   DraftRow,
   EmailTokenKind,
   EmailTokenRow,
+  NotificationRow,
+  NotificationType,
   PostRow,
   ReportReasonRow,
   ReportRow,
@@ -35,6 +38,7 @@ import type {
   ThreadRow,
   UserAuthRow,
   UserGroupRow,
+  UserSettings,
 } from '../shared/types'
 
 /** Shown until the setup wizard (or an admin) writes a real name. */
@@ -46,6 +50,16 @@ const nowISO = () => new Date().toISOString()
 export const GLOBAL_PIN_LIMIT = 3
 /** New accounts start here; an accepted report costs the author 20. */
 export const CREDIT_START = 100
+
+/**
+ * Registering accounts start at CREDIT_START, but never above the configured
+ * ceiling. Called on every creation, so a lowered cap also affects new accounts
+ * without rewriting existing rows.
+ */
+async function startingCredit(): Promise<number> {
+  const { creditMax } = await getSettings()
+  return creditMax > 0 ? Math.min(CREDIT_START, creditMax) : CREDIT_START
+}
 /** Dropping below this auto-bans the account. */
 export const CREDIT_BAN_THRESHOLD = 60
 export const CREDIT_REPORT_PENALTY = 20
@@ -132,7 +146,7 @@ export async function createGithubUser(input: {
     role: 'user',
     groupId: null,
     banned: false,
-    credit: CREDIT_START,
+    credit: await startingCredit(),
     banReason: '',
     bannedUntil: null,
     email: input.email,
@@ -219,11 +233,11 @@ export async function createUser(input: {
   avatarUrl: string
   createdAt: string
 }): Promise<number> {
-  return insertReturningId(t.users, {
+  const id = await insertReturningId(t.users, {
     ...input,
     groupId: null,
     banned: false,
-    credit: CREDIT_START,
+    credit: await startingCredit(),
     banReason: '',
     bannedUntil: null,
     // Accounts start unbound; binding is a post-login action.
@@ -231,6 +245,9 @@ export async function createUser(input: {
     emailVerified: false,
     sessionVersion: 0,
   })
+  // Administrators belong to the seeded admin group from the moment they exist.
+  if (input.role === 'admin') await setUserGroup(id, await ensureAdminGroup())
+  return id
 }
 
 export async function updateUserProfile(
@@ -295,13 +312,42 @@ export async function applyCredit(
 ): Promise<{ credit: number; banned: boolean }> {
   const user = await findUserById(id)
   if (!user) return { credit: 0, banned: false }
-  const credit = user.credit + delta
+  const { creditMax } = await getSettings()
+  let credit = user.credit + delta
+  // The ceiling only stops gains: a score already above a newly lowered cap is
+  // grandfathered, and a penalty still lowers it normally.
+  if (delta > 0 && creditMax > 0) {
+    credit = Math.min(credit, Math.max(user.credit, creditMax))
+  }
   await db.update(t.users).set({ credit }).where(eq(t.users.id, id))
   if (credit < CREDIT_BAN_THRESHOLD && !user.banned) {
     await setUserBan(id, { banned: true, reason: `信用分低于 ${CREDIT_BAN_THRESHOLD}`, until: null })
     return { credit, banned: true }
   }
   return { credit, banned: user.banned }
+}
+
+/**
+ * Gives every real account (system id < 0 excluded) `points` credit without
+ * crossing the ceiling. Returns the total points actually awarded. Called by
+ * the recovery scheduler, never by a request path.
+ */
+export async function recoverCredit(points: number, creditMax: number): Promise<number> {
+  if (points <= 0) return 0
+  const ceiling = creditMax > 0 ? creditMax : Number.POSITIVE_INFINITY
+  const rows: any[] = await db
+    .select({ id: t.users.id, credit: t.users.credit })
+    .from(t.users)
+    .where(gt(t.users.id, 0))
+  let awarded = 0
+  for (const row of rows) {
+    const current = Number(row.credit)
+    if (current >= ceiling) continue
+    const next = Math.min(current + points, ceiling)
+    await db.update(t.users).set({ credit: next }).where(eq(t.users.id, Number(row.id)))
+    awarded += next - current
+  }
+  return awarded
 }
 
 /**
@@ -312,6 +358,7 @@ export async function applyCredit(
 export async function listUsers(): Promise<AdminUser[]> {
   const rows: any[] = await db.select().from(t.users).orderBy(asc(t.users.id))
   const counts = await groupCounts(t.posts, t.posts.authorId)
+  const warnings = await groupCounts(t.userWarnings, t.userWarnings.userId)
   // toPublicUser strips password_hash: Drizzle selected it even though we do
   // not want it reaching any response body. Ban internals are added back only
   // in this admin-only projection.
@@ -319,6 +366,7 @@ export async function listUsers(): Promise<AdminUser[]> {
     ...toPublicUser(r),
     banned: Boolean(r.banned),
     postCount: counts.get(Number(r.id)) ?? 0,
+    warningCount: warnings.get(Number(r.id)) ?? 0,
     banReason: r.banReason ?? '',
     bannedUntil: r.bannedUntil ?? null,
   }))
@@ -337,6 +385,7 @@ export async function listGroups(): Promise<UserGroupRow[]> {
     name: r.name,
     color: r.color,
     position: Number(r.position),
+    builtin: !!r.builtin,
     memberCount: counts.get(Number(r.id)) ?? 0,
   }))
 }
@@ -349,7 +398,66 @@ export async function findGroup(id: number): Promise<UserGroupRow | null> {
     name: rows[0].name,
     color: rows[0].color,
     position: Number(rows[0].position),
+    builtin: !!rows[0].builtin,
   }
+}
+
+/** Name and colour of the seeded administrator group. */
+export const ADMIN_GROUP_NAME = '管理员'
+const ADMIN_GROUP_COLOR = '#f5b32c'
+
+/**
+ * The built-in administrator group, created once. An existing group named
+ * `管理员` is adopted (and marked builtin) so an install that created one by
+ * hand does not end up with two.
+ */
+export async function ensureAdminGroup(): Promise<number> {
+  const byFlag: any[] = await db
+    .select()
+    .from(t.userGroups)
+    .where(eq(t.userGroups.builtin, true))
+    .limit(1)
+  if (byFlag[0]) return Number(byFlag[0].id)
+
+  const byName: any[] = await db
+    .select()
+    .from(t.userGroups)
+    .where(eq(t.userGroups.name, ADMIN_GROUP_NAME))
+    .limit(1)
+  if (byName[0]) {
+    await db.update(t.userGroups).set({ builtin: true }).where(eq(t.userGroups.id, byName[0].id))
+    return Number(byName[0].id)
+  }
+
+  return insertReturningId(t.userGroups, {
+    name: ADMIN_GROUP_NAME,
+    color: ADMIN_GROUP_COLOR,
+    position: 0,
+    builtin: true,
+  })
+}
+
+/**
+ * Enforces the one invariant the rest of the app assumes: holding the 管理员
+ * group and being an admin are the same fact.
+ *
+ * Existing admins are moved into the group (even out of a custom badge, since
+ * a user can only hold one group), then everyone in the group is made admin —
+ * covering a membership written straight into the database.
+ */
+export async function syncAdminGroup(): Promise<number> {
+  const groupId = await ensureAdminGroup()
+  await db
+    .update(t.users)
+    .set({ groupId })
+    .where(
+      and(
+        eq(t.users.role, 'admin'),
+        or(isNull(t.users.groupId), ne(t.users.groupId, groupId)),
+      ),
+    )
+  await db.update(t.users).set({ role: 'admin' }).where(eq(t.users.groupId, groupId))
+  return groupId
 }
 
 export async function createGroup(input: {
@@ -357,7 +465,7 @@ export async function createGroup(input: {
   color: string
   position: number
 }): Promise<number> {
-  return insertReturningId(t.userGroups, input)
+  return insertReturningId(t.userGroups, { ...input, builtin: false })
 }
 
 export async function updateGroup(
@@ -380,6 +488,69 @@ export async function deleteGroup(id: number): Promise<void> {
 
 export async function setUserGroup(id: number, groupId: number | null): Promise<void> {
   await db.update(t.users).set({ groupId }).where(eq(t.users.id, id))
+}
+
+// ------------------------------------------------------------- warnings
+
+/**
+ * Records an admin warning. The notification is written by the route that
+ * calls this, next to the role/permission checks.
+ */
+export async function createWarning(input: {
+  userId: number
+  adminId: number
+  reason: string
+}): Promise<number> {
+  return insertReturningId(t.userWarnings, { ...input, createdAt: nowISO() })
+}
+
+// --------------------------------------------------------------- blocks
+
+/**
+ * Blacklist is directional: `blockerId` no longer receives @mentions from
+ * `blockedId` and refuses their private messages. Reading and public content
+ * are unaffected.
+ */
+const blockedUserColumns = {
+  id: t.users.id,
+  username: t.users.username,
+  displayName: t.users.displayName,
+  avatarUrl: t.users.avatarUrl,
+}
+
+export async function listBlockedUsers(blockerId: number): Promise<BlockedUser[]> {
+  const rows: any[] = await db
+    .select(blockedUserColumns)
+    .from(t.userBlocks)
+    .innerJoin(t.users, eq(t.userBlocks.blockedId, t.users.id))
+    .where(eq(t.userBlocks.blockerId, blockerId))
+    .orderBy(asc(t.users.displayName), asc(t.users.id))
+  return rows.map((r: any) => ({
+    id: Number(r.id),
+    username: r.username,
+    displayName: r.displayName,
+    avatarUrl: r.avatarUrl ?? '',
+  }))
+}
+
+/** True when `blockedId` is not allowed to @ or DM `blockerId`. */
+export async function isBlocked(blockerId: number, blockedId: number): Promise<boolean> {
+  const rows: any[] = await db
+    .select({ blockerId: t.userBlocks.blockerId })
+    .from(t.userBlocks)
+    .where(and(eq(t.userBlocks.blockerId, blockerId), eq(t.userBlocks.blockedId, blockedId)))
+    .limit(1)
+  return rows.length > 0
+}
+
+export async function blockUser(blockerId: number, blockedId: number): Promise<void> {
+  await db.insert(t.userBlocks).values({ blockerId, blockedId, createdAt: nowISO() })
+}
+
+export async function unblockUser(blockerId: number, blockedId: number): Promise<void> {
+  await db
+    .delete(t.userBlocks)
+    .where(and(eq(t.userBlocks.blockerId, blockerId), eq(t.userBlocks.blockedId, blockedId)))
 }
 
 // ----------------------------------------------------------- categories
@@ -466,6 +637,9 @@ export async function getSettings(): Promise<SettingsRow> {
     siteDescription: rows[0]?.siteDescription ?? '',
     siteNotice: rows[0]?.siteNotice ?? '',
     siteFooter: rows[0]?.siteFooter ?? '',
+    dmMinCredit: Number(rows[0]?.dmMinCredit ?? 0),
+    creditMax: Number(rows[0]?.creditMax ?? 1000),
+    creditRecoverMinutes: Number(rows[0]?.creditRecoverMinutes ?? 0),
   }
 }
 
@@ -478,6 +652,47 @@ export async function saveSettings(input: SettingsRow): Promise<void> {
     .limit(1)
   if (rows.length) await db.update(t.settings).set(input).where(eq(t.settings.id, 1))
   else await db.insert(t.settings).values({ id: 1, ...input })
+}
+
+// ------------------------------------------------------- user settings
+
+/** Used until an account saves its settings; no row exists before that. */
+export const DEFAULT_USER_SETTINGS: UserSettings = {
+  notifyReply: true,
+  notifyMention: true,
+  notifyLike: true,
+  notifyDm: true,
+}
+
+export async function getUserSettings(userId: number): Promise<UserSettings> {
+  const rows: any[] = await db
+    .select()
+    .from(t.userSettings)
+    .where(eq(t.userSettings.userId, userId))
+    .limit(1)
+  const row = rows[0]
+  if (!row) return { ...DEFAULT_USER_SETTINGS }
+  return {
+    notifyReply: !!row.notifyReply,
+    notifyMention: !!row.notifyMention,
+    notifyLike: !!row.notifyLike,
+    notifyDm: !!row.notifyDm,
+  }
+}
+
+/** Upsert written by hand: Drizzle spells ON CONFLICT differently per engine. */
+export async function saveUserSettings(userId: number, settings: UserSettings): Promise<void> {
+  const values = { userId, ...settings }
+  const existing: any[] = await db
+    .select({ userId: t.userSettings.userId })
+    .from(t.userSettings)
+    .where(eq(t.userSettings.userId, userId))
+    .limit(1)
+  if (existing.length) {
+    await db.update(t.userSettings).set(values).where(eq(t.userSettings.userId, userId))
+  } else {
+    await db.insert(t.userSettings).values(values)
+  }
 }
 
 // --------------------------------------------------------- email tokens
@@ -643,6 +858,35 @@ export async function listAllThreads(limit: number, offset: number): Promise<Thr
   return hydrateThreads(rows)
 }
 
+/**
+ * One board plus its direct sub-boards — what a reader expects when they
+ * subscribe to a parent board. The schema only allows one level of nesting, so
+ * no recursion is needed. Same ordering as the board page itself.
+ */
+export async function listThreadsInCategoryTree(
+  categoryId: number,
+  limit: number,
+): Promise<ThreadRow[]> {
+  const children: any[] = await db
+    .select({ id: t.categories.id })
+    .from(t.categories)
+    .where(eq(t.categories.parentId, categoryId))
+  const ids = [categoryId, ...children.map((row) => Number(row.id))]
+  const rows: any[] = await db
+    .select(threadWithAuthor)
+    .from(t.threads)
+    .leftJoin(t.users, eq(t.threads.authorId, t.users.id))
+    .where(inArray(t.threads.categoryId, ids))
+    .orderBy(
+      desc(t.threads.isGlobalPinned),
+      desc(t.threads.isAllBoardsPinned),
+      desc(t.threads.isPinned),
+      desc(t.threads.lastPostAt),
+    )
+    .limit(limit)
+  return hydrateThreads(rows)
+}
+
 /** Title search for the header box. Public. `%`/`_` in the term act as wildcards. */
 export async function searchThreads(q: string, limit: number, offset: number): Promise<ThreadRow[]> {
   const rows: any[] = await db
@@ -738,6 +982,18 @@ export async function findOpeningPostId(threadId: number): Promise<number | null
     .where(and(eq(t.posts.threadId, threadId), sql`${t.posts.parentId} IS NULL`))
     .limit(1)
   return rows[0] ? Number(rows[0].id) : null
+}
+
+/** Opening-post bodies for a set of threads — one query for a feed page. */
+export async function openingPostBodies(threadIds: number[]): Promise<Map<number, string>> {
+  const map = new Map<number, string>()
+  if (!threadIds.length) return map
+  const rows: any[] = await db
+    .select({ threadId: t.posts.threadId, body: t.posts.body })
+    .from(t.posts)
+    .where(and(inArray(t.posts.threadId, threadIds), sql`${t.posts.parentId} IS NULL`))
+  for (const r of rows) map.set(Number(r.threadId), r.body)
+  return map
 }
 
 /** External id → local post id, for incremental re-imports and reply parenting. */
@@ -974,6 +1230,19 @@ export async function findPost(id: number): Promise<PostRow | null> {
   return (rows[0] as PostRow) ?? null
 }
 
+/** One post with its author and like state — used by the live-update payload. */
+export async function findPostHydrated(id: number): Promise<PostRow | null> {
+  const rows: any[] = await db
+    .select(postWithAuthor)
+    .from(t.posts)
+    .leftJoin(t.users, eq(t.posts.authorId, t.users.id))
+    .where(eq(t.posts.id, id))
+    .limit(1)
+  if (!rows[0]) return null
+  const likes = await groupCounts(t.postLikes, t.postLikes.postId, [id])
+  return hydratePost(rows[0], likes.get(id) ?? 0, false)
+}
+
 /**
  * ponytail: insert + `lastPostAt` bump are two statements, not a transaction —
  * Drizzle's transaction API is sync on SQLite and async on PG/MySQL, so sharing
@@ -1036,6 +1305,131 @@ export async function toggleLike(
   }
 }
 
+// ----------------------------------------------------------- notifications
+
+/** Writes an inbox row; the caller delivers it live to the recipient. */
+export async function createNotification(input: {
+  userId: number
+  type: NotificationType
+  actorId?: number | null
+  threadId?: number | null
+  postId?: number | null
+  dmThreadId?: number | null
+  body: string
+  excerpt?: string
+}): Promise<NotificationRow> {
+  const createdAt = nowISO()
+  const values = {
+    userId: input.userId,
+    type: input.type,
+    actorId: input.actorId ?? null,
+    threadId: input.threadId ?? null,
+    postId: input.postId ?? null,
+    dmThreadId: input.dmThreadId ?? null,
+    body: input.body,
+    excerpt: input.excerpt ?? '',
+    readAt: null,
+    createdAt,
+  }
+  const id = await insertReturningId(t.notifications, values)
+  return { id, ...values }
+}
+
+/** Newest first. Joins the actor so the inbox needs no second round trip. */
+export async function listNotifications(userId: number, limit = 30): Promise<NotificationRow[]> {
+  const rows: any[] = await db
+    .select({
+      id: t.notifications.id,
+      userId: t.notifications.userId,
+      type: t.notifications.type,
+      actorId: t.notifications.actorId,
+      threadId: t.notifications.threadId,
+      postId: t.notifications.postId,
+      dmThreadId: t.notifications.dmThreadId,
+      body: t.notifications.body,
+      excerpt: t.notifications.excerpt,
+      readAt: t.notifications.readAt,
+      createdAt: t.notifications.createdAt,
+      actorUsername: t.users.username,
+      actorDisplayName: t.users.displayName,
+      actorAvatarUrl: t.users.avatarUrl,
+    })
+    .from(t.notifications)
+    .leftJoin(t.users, eq(t.notifications.actorId, t.users.id))
+    .where(eq(t.notifications.userId, userId))
+    .orderBy(desc(t.notifications.createdAt), desc(t.notifications.id))
+    .limit(limit)
+
+  return rows.map((r: any) => ({
+    id: Number(r.id),
+    userId: Number(r.userId),
+    type: r.type as NotificationType,
+    actorId: r.actorId == null ? null : Number(r.actorId),
+    threadId: r.threadId == null ? null : Number(r.threadId),
+    postId: r.postId == null ? null : Number(r.postId),
+    dmThreadId: r.dmThreadId == null ? null : Number(r.dmThreadId),
+    body: r.body,
+    excerpt: r.excerpt ?? '',
+    readAt: r.readAt ?? null,
+    createdAt: r.createdAt,
+    ...(r.actorId == null
+      ? {}
+      : {
+          actor: {
+            id: Number(r.actorId),
+            username: r.actorUsername ?? '',
+            displayName: r.actorDisplayName ?? '',
+            avatarUrl: r.actorAvatarUrl ?? '',
+          },
+        }),
+  }))
+}
+
+export async function countUnreadNotifications(userId: number): Promise<number> {
+  const rows: any[] = await db
+    .select({ n: count() })
+    .from(t.notifications)
+    .where(and(eq(t.notifications.userId, userId), isNull(t.notifications.readAt)))
+  return Number(rows[0]?.n ?? 0)
+}
+
+/** Clears the unread dm notice for one conversation (opening it is reading it). */
+export async function markDmNotificationsRead(userId: number, dmThreadId: number): Promise<void> {
+  await db
+    .update(t.notifications)
+    .set({ readAt: nowISO() })
+    .where(
+      and(
+        eq(t.notifications.userId, userId),
+        eq(t.notifications.dmThreadId, dmThreadId),
+        isNull(t.notifications.readAt),
+      ),
+    )
+}
+
+/** True when the bell already shows unread mail from this conversation. */
+export async function hasUnreadDmNotification(userId: number, dmThreadId: number): Promise<boolean> {
+  const rows: any[] = await db
+    .select({ id: t.notifications.id })
+    .from(t.notifications)
+    .where(
+      and(
+        eq(t.notifications.userId, userId),
+        eq(t.notifications.dmThreadId, dmThreadId),
+        isNull(t.notifications.readAt),
+      ),
+    )
+    .limit(1)
+  return rows.length > 0
+}
+
+/** Marks the given ids read, or the whole inbox when ids is omitted/empty. */
+export async function markNotificationsRead(userId: number, ids?: number[]): Promise<void> {
+  const where = [eq(t.notifications.userId, userId), isNull(t.notifications.readAt)]
+  if (ids && ids.length) where.push(inArray(t.notifications.id, ids))
+  await db.update(t.notifications).set({ readAt: nowISO() }).where(and(...where))
+}
+
 // --------------------------------------------------------------- counts
 
 export async function authorStats(userId: number): Promise<{ threadCount: number; postCount: number }> {
@@ -1043,6 +1437,55 @@ export async function authorStats(userId: number): Promise<{ threadCount: number
     threadCount: await countWhere(t.threads, t.threads.authorId, userId),
     postCount: await countWhere(t.posts, t.posts.authorId, userId),
   }
+}
+
+// ------------------------------------------------------- upload refs
+
+/**
+ * Which of the given storage keys are still referenced by user content.
+ *
+ * Batched: one query per table per 50 keys instead of one per key. Content
+ * columns are TEXT and the match is a substring, so this is a scan — fine for a
+ * sweep that only looks at files older than a day.
+ *
+ * Scope is deliberate: posts (opening + replies), drafts (unpublished content
+ * keeps its images), DM messages, avatars and the editable site texts. Anything
+ * else that merely prints a URL (bio, report reason) is plain text and cannot
+ * embed an upload.
+ */
+export async function referencedUploadKeys(keys: string[]): Promise<Set<string>> {
+  const found = new Set<string>()
+  const wanted = [...new Set(keys)]
+  if (!wanted.length) return found
+
+  for (let i = 0; i < wanted.length; i += 50) {
+    const batch = wanted.slice(i, i + 50)
+    const anyMatch = (column: any) =>
+      or(...batch.map((key) => like(column, `%${key}%`)))
+    const [posts, drafts, messages, avatars, settingsRows] = await Promise.all([
+      db.select({ body: t.posts.body }).from(t.posts).where(anyMatch(t.posts.body)),
+      db.select({ body: t.drafts.body }).from(t.drafts).where(anyMatch(t.drafts.body)),
+      db.select({ body: t.dmMessages.body }).from(t.dmMessages).where(anyMatch(t.dmMessages.body)),
+      db.select({ avatarUrl: t.users.avatarUrl }).from(t.users).where(anyMatch(t.users.avatarUrl)),
+      db
+        .select({ notice: t.settings.siteNotice, footer: t.settings.siteFooter })
+        .from(t.settings)
+        .where(or(anyMatch(t.settings.siteNotice), anyMatch(t.settings.siteFooter))),
+    ])
+
+    const texts: string[] = [
+      ...posts.map((row: any) => row.body),
+      ...drafts.map((row: any) => row.body),
+      ...messages.map((row: any) => row.body),
+      ...avatars.map((row: any) => row.avatarUrl),
+      ...settingsRows.flatMap((row: any) => [row.notice, row.footer]),
+    ]
+    for (const text of texts) {
+      if (!text) continue
+      for (const key of batch) if (text.includes(key)) found.add(key)
+    }
+  }
+  return found
 }
 
 // ------------------------------------------------------- report reasons
@@ -1440,6 +1883,42 @@ export async function listDmMessages(threadId: number): Promise<DmMessageRow[]> 
       groupId: r.authorGroupId ?? null,
     },
   }))
+}
+
+/** One message with its author, so the live event needs no client refetch. */
+export async function findDmMessage(id: number): Promise<DmMessageRow | null> {
+  const rows: any[] = await db
+    .select({
+      id: t.dmMessages.id,
+      threadId: t.dmMessages.threadId,
+      authorId: t.dmMessages.authorId,
+      body: t.dmMessages.body,
+      createdAt: t.dmMessages.createdAt,
+      authorUsername: t.users.username,
+      authorDisplayName: t.users.displayName,
+      authorAvatarUrl: t.users.avatarUrl,
+      authorGroupId: t.users.groupId,
+    })
+    .from(t.dmMessages)
+    .leftJoin(t.users, eq(t.dmMessages.authorId, t.users.id))
+    .where(eq(t.dmMessages.id, id))
+    .limit(1)
+  const r = rows[0]
+  if (!r) return null
+  return {
+    id: Number(r.id),
+    threadId: Number(r.threadId),
+    authorId: Number(r.authorId),
+    body: r.body,
+    createdAt: r.createdAt,
+    author: {
+      id: Number(r.authorId),
+      username: r.authorUsername ?? '',
+      displayName: r.authorDisplayName ?? '',
+      avatarUrl: r.authorAvatarUrl ?? '',
+      groupId: r.authorGroupId ?? null,
+    },
+  }
 }
 
 export async function createDmMessage(input: {

@@ -12,6 +12,7 @@ export const meta = reactive({
   mailConfigured: false,
   requireEmail: false,
   githubOAuth: false,
+  dmMinCredit: 0,
 })
 
 export async function loadMeta(): Promise<void> {
@@ -20,6 +21,7 @@ export async function loadMeta(): Promise<void> {
     meta.mailConfigured = m.mailConfigured
     meta.requireEmail = m.requireEmail
     meta.githubOAuth = m.githubOAuth
+    meta.dmMinCredit = m.dmMinCredit ?? 0
   } catch {
     // Unreachable API: assume no forced binding rather than locking the UI.
   } finally {

@@ -20,6 +20,14 @@ Vue 3 + Vite，组件基于 [Reka UI](https://reka-ui.com)，同一套代码可�
 - 点赞（每人每帖一次，可取消）
 - 个人主页：资料编辑、主题与回复计数、发表过的主题
 - 管理后台：版块增删改、用户封禁与角色调整、主题置顶 / 锁定 / 删除
+- 内置「管理员」用户组：加入该组即成为管理员，移出即降为普通用户；名称与删除受保护
+- 封禁提示：被封禁账号的资料页会显示封禁理由与期限（临时封禁自动到期解除）
+- 封禁限制：被封禁账号仍可登录浏览，但只能与管理员私信；发主题、回复、私信普通成员都会被拒绝
+- 管理员警告：后台可对违规用户发送警告（记录次数），警告与封禁都会进入对方的通知箱
+- 黑名单：在设置里拉黑用户后，对方无法 @ 你，也无法给你发私信（单向，随时解除）
+- 私信信用分门槛：后台上设置最低信用分，低于门槛的账号不能发起或发送私信（0 表示不限制；管理员与封禁申诉不受限）
+- 信用分上限：后台可设置最高信用分（0 表示不限制）；加分不会超过上限，扣分照常，已超标的账号不被回溯
+- 信用分自动恢复：后台设置恢复间隔（分钟），每隔一段时间所有低于上限的账号 +1 分；0 关闭，重启后重新计时
 - 邮箱：绑定 / 更换 / 解绑账号邮箱，用邮件验证码确认；已验证邮箱可**代替用户名登录**
 - 找回密码：用已验证邮箱接收验证码重设密码（验证码 15 分钟有效、限次、发信限流）；**重置成功即踢掉该账号的全部旧会话**
 - 强制绑定邮箱：环境变量 `REQUIRE_EMAIL_BINDING=true` 时，未验证邮箱的账号登录后只能待在绑定页
@@ -28,6 +36,12 @@ Vue 3 + Vite，组件基于 [Reka UI](https://reka-ui.com)，同一套代码可�
 - 非首次安装（已有账号）时，首个注册的账号自动成为管理员
 - 从 GitHub Discussions 导入主题与评论，保留原时间与作者（CLI，可重复执行）
 - GitHub OAuth 登录：导入产生的占位账号可由作者本人授权后认领
+- 亮色 / 暗色主题：跟随系统的 `prefers-color-scheme` 自动切换，全站共用一套颜色变量
+- 实时更新：SSE 推送新主题、新回复、私信与通知
+- 通知中心：回复 / @提及 / 点赞 / 私信提醒，导航栏铃铛与通知页
+- RSS 订阅：全站 `/feed.xml`，单个版块 `/c/:id/feed.xml`（父版块含子版块）；`/feeds` 列出全部订阅源（公开、无需登录）
+- 用户设置：个人资料（昵称 / 简介 / 头像）、邮箱绑定、修改密码、通知偏好（回复 / 提及 / 点赞 / 私信可分别关闭）
+- 自动清理上传：超过 24 小时仍未被主题 / 回复 / 草稿 / 私信 / 头像 / 站点公告引用的上传文件会被定期删除
 
 ## Markdown 渲染
 
@@ -219,8 +233,8 @@ NODE_ENV=production
 ## 生产部署
 
 ```bash
-bun run build     # 前端产物输出到 dist/
-bun run start     # 同时提供 /api 与 dist/ 静态文件
+bun run build     # 前端产物输出到 public/（页面与 assets/）
+bun run start     # 同时提供 /api 与 public/ 静态文件
 ```
 
 生产环境通过 `.env` 设置（Bun 会自动加载，且不依赖 shell 语法，Windows 上同样有效）：
@@ -233,7 +247,7 @@ SESSION_SECRET=<openssl rand -hex 32 的输出>
 `NODE_ENV=production` 时若缺少 `SESSION_SECRET`，服务会直接拒绝启动，而不是悄悄
 回退到开发用的默认值。
 
-`bun run start` 会让 Hono 同时提供 `/api` 和 `dist/` 里的静态文件，SPA 路由
+`bun run start` 会把 `public/` 当作网站根目录：`/api` 之外，`public/index.html`、`public/assets/` 与上传目录都由 Hono 直接提供，SPA 路由
 回退到 `index.html`，未知的 `/api/*` 仍然返回 JSON 404。
 
 ## 项目结构
@@ -275,6 +289,7 @@ bunfig.toml              测试预加载，保证测试不碰真实的库与上�
 | `GET` | `/api/setup/status` | 是否需要初始化 + 站点信息（公开） |
 | `POST` | `/api/setup` | 首次初始化：管理员 / 站点信息 / 版块 / 标签（仅无账号时可用） |
 | `GET` | `/api/categories` | 版块列表（含主题数） |
+| `GET` | `/feed.xml` · `/c/:id/feed.xml` | RSS 2.0 订阅（全站 / 单个版块，父版块含子版块；公开，`/rss.xml` 会跳转） |
 | `GET` | `/api/categories/:id/threads` | 版块内主题（`?limit&offset`） |
 | `GET` | `/api/threads/:id` | 主题与其全部回复 |
 | `POST` | `/api/threads` | 发主题 |
@@ -283,6 +298,9 @@ bunfig.toml              测试预加载，保证测试不碰真实的库与上�
 | `DELETE` | `/api/posts/:id` · `/api/threads/:id` | 删除（作者或管理员） |
 | `GET` | `/api/users/:username` · `/api/users/:username/threads` | 个人主页 |
 | `PATCH` | `/api/users/me` | 编辑资料 |
+| `GET` · `PATCH` | `/api/users/me/settings` | 个人通知偏好（需登录） |
+| `GET` · `POST` · `DELETE` | `/api/users/me/blocks` | 黑名单：列表 / 按用户名拉黑 / 解除（需登录） |
+| `POST` | `/api/users/me/password` | 修改密码（需验证当前密码，其他会话失效） |
 | `POST` · `DELETE` | `/api/users/me/email` | 绑定 / 更换 / 解绑邮箱（需登录） |
 | `POST` | `/api/users/me/email/verify` | 用 6 位验证码确认邮箱（需登录，body `{ code }`） |
 | `POST` | `/api/uploads` | 上传图片 / PDF / 视频（需登录，multipart 的 `file` 字段） |

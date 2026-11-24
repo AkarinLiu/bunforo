@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev": "concurrently -k -n api,web -c yellow,cyan \"bun --watch index.ts\" \"vite\"",
-    "build": "vite build",
+    "build": "bun scripts/clean-public.ts && vite build",
     "start": "bun index.ts",
     "migrate:s3": "bun scripts/migrate-to-s3.ts",
     "import:github": "bun scripts/import-github.ts",

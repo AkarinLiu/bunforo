@@ -10,9 +10,10 @@ import {
 } from 'reka-ui'
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { auth, logout } from '../store'
+import { auth, logout, markNotificationsRead, notifications } from '../store'
 import { setup } from '../setup'
 import UserAvatar from './UserAvatar.vue'
+import type { NotificationRow } from '../../shared/types'
 
 const emit = defineEmits<{ toggleMenu: [] }>()
 
@@ -40,9 +41,31 @@ function goDrafts(): void {
   void router.push('/drafts')
 }
 
+function goSettings(): void {
+  void router.push('/settings')
+}
+
 async function onLogout(): Promise<void> {
   await logout()
   await router.push('/')
+}
+
+const time = (iso: string): string => iso.replace('T', ' ').slice(5, 16)
+
+/** Marks the row read and follows its target; notifications carry the link. */
+async function openNotification(n: NotificationRow): Promise<void> {
+  if (!n.readAt) void markNotificationsRead([n.id])
+  if (n.dmThreadId) await router.push(`/messages/${n.dmThreadId}`)
+  else if (n.threadId) await router.push(`/t/${n.threadId}`)
+  else await router.push('/notifications')
+}
+
+function goNotifications(): void {
+  void router.push('/notifications')
+}
+
+function markAllRead(): void {
+  void markNotificationsRead()
 }
 </script>
 
@@ -76,6 +99,55 @@ async function onLogout(): Promise<void> {
 
         <template v-else-if="auth.user">
           <DropdownMenuRoot>
+            <DropdownMenuTrigger class="icon-btn bell-btn" aria-label="通知">
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9" />
+                <path d="M13.7 21a2 2 0 0 1-3.4 0" />
+              </svg>
+              <span v-if="notifications.unread" class="bell-badge">
+                {{ notifications.unread > 99 ? '99+' : notifications.unread }}
+              </span>
+            </DropdownMenuTrigger>
+            <DropdownMenuPortal>
+              <DropdownMenuContent class="menu-content notif-menu" align="end">
+                <div class="notif-head">
+                  <span>通知</span>
+                  <button
+                    v-if="notifications.unread"
+                    class="notif-clear"
+                    type="button"
+                    @click="markAllRead"
+                  >
+                    全部已读
+                  </button>
+                </div>
+
+                <p v-if="!notifications.items.length" class="notif-empty">暂无通知</p>
+
+                <DropdownMenuItem
+                  v-for="n in notifications.items.slice(0, 8)"
+                  :key="n.id"
+                  class="menu-item notif-item"
+                  :class="{ unread: !n.readAt }"
+                  @select="openNotification(n)"
+                >
+                  <UserAvatar v-if="n.actor" :user="n.actor" :size="28" />
+                  <span class="notif-text">
+                    <span class="notif-body">{{ n.body }}</span>
+                    <span v-if="n.excerpt" class="notif-excerpt">{{ n.excerpt }}</span>
+                    <span class="notif-time">{{ time(n.createdAt) }}</span>
+                  </span>
+                </DropdownMenuItem>
+
+                <DropdownMenuSeparator class="menu-sep" />
+                <DropdownMenuItem class="menu-item" @select="goNotifications">
+                  查看全部通知
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenuPortal>
+          </DropdownMenuRoot>
+
+          <DropdownMenuRoot>
             <DropdownMenuTrigger class="avatar-btn" aria-label="账户菜单">
               <UserAvatar :user="auth.user" :size="30" />
             </DropdownMenuTrigger>
@@ -85,6 +157,7 @@ async function onLogout(): Promise<void> {
                 <DropdownMenuItem class="menu-item" @select="goProfile">个人主页</DropdownMenuItem>
                 <DropdownMenuItem class="menu-item" @select="goMessages">私信</DropdownMenuItem>
                 <DropdownMenuItem class="menu-item" @select="goDrafts">草稿箱</DropdownMenuItem>
+                <DropdownMenuItem class="menu-item" @select="goSettings">设置</DropdownMenuItem>
                 <DropdownMenuSeparator class="menu-sep" />
                 <DropdownMenuItem class="menu-item" @select="onLogout">退出登录</DropdownMenuItem>
               </DropdownMenuContent>

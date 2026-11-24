@@ -53,7 +53,8 @@ const sqlite = {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL UNIQUE,
       color TEXT NOT NULL,
-      position INTEGER NOT NULL DEFAULT 0
+      position INTEGER NOT NULL DEFAULT 0,
+      builtin BOOLEAN NOT NULL DEFAULT FALSE
     )`,
     `CREATE TABLE IF NOT EXISTS categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -130,6 +131,39 @@ const sqlite = {
       body TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE,
+      post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+      dm_thread_id INTEGER REFERENCES dm_threads(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      excerpt TEXT NOT NULL DEFAULT '',
+      read_at TEXT,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (blocker_id, blocked_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_settings (
+      user_id INTEGER NOT NULL PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      notify_reply BOOLEAN NOT NULL DEFAULT TRUE,
+      notify_mention BOOLEAN NOT NULL DEFAULT TRUE,
+      notify_like BOOLEAN NOT NULL DEFAULT TRUE,
+      notify_dm BOOLEAN NOT NULL DEFAULT TRUE
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_warnings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS report_reasons (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       label TEXT NOT NULL UNIQUE,
@@ -149,7 +183,10 @@ const sqlite = {
       site_name TEXT NOT NULL DEFAULT '',
       site_description TEXT NOT NULL DEFAULT '',
       site_notice TEXT NOT NULL DEFAULT '',
-      site_footer TEXT NOT NULL DEFAULT ''
+      site_footer TEXT NOT NULL DEFAULT '',
+      dm_min_credit INTEGER NOT NULL DEFAULT 0,
+      credit_max INTEGER NOT NULL DEFAULT 1000,
+      credit_recover_minutes INTEGER NOT NULL DEFAULT 0
     )`,
   ],
   patches: [
@@ -172,6 +209,16 @@ const sqlite = {
     `ALTER TABLE users ADD COLUMN github_id TEXT`,
     `ALTER TABLE threads ADD COLUMN external_id TEXT`,
     `ALTER TABLE posts ADD COLUMN external_id TEXT`,
+    // Notification preview text; empty on rows created before it existed.
+    `ALTER TABLE notifications ADD COLUMN excerpt TEXT NOT NULL DEFAULT ''`,
+    // Seeded administrator group; older databases adopt it on boot.
+    `ALTER TABLE user_groups ADD COLUMN builtin BOOLEAN NOT NULL DEFAULT FALSE`,
+    // Minimum credit for private messages; 0 disables the requirement.
+    `ALTER TABLE settings ADD COLUMN dm_min_credit INTEGER NOT NULL DEFAULT 0`,
+    // Ceiling for credit awards; 0 disables the ceiling.
+    `ALTER TABLE settings ADD COLUMN credit_max INTEGER NOT NULL DEFAULT 1000`,
+    // Automatic credit recovery interval in minutes; 0 disables it.
+    `ALTER TABLE settings ADD COLUMN credit_recover_minutes INTEGER NOT NULL DEFAULT 0`,
   ],
   indexes: [
     `CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category_id)`,
@@ -191,6 +238,8 @@ const sqlite = {
     `CREATE INDEX IF NOT EXISTS idx_dm_participants_user ON dm_participants(user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_dm_messages_thread ON dm_messages(thread_id)`,
     `CREATE INDEX IF NOT EXISTS idx_drafts_author ON drafts(author_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_user_warnings_user ON user_warnings(user_id)`,
   ],
 }
 
@@ -229,7 +278,8 @@ const pg = {
       id SERIAL PRIMARY KEY,
       name TEXT NOT NULL UNIQUE,
       color TEXT NOT NULL,
-      position INTEGER NOT NULL DEFAULT 0
+      position INTEGER NOT NULL DEFAULT 0,
+      builtin BOOLEAN NOT NULL DEFAULT FALSE
     )`,
     `CREATE TABLE IF NOT EXISTS categories (
       id SERIAL PRIMARY KEY,
@@ -306,6 +356,39 @@ const pg = {
       body TEXT NOT NULL,
       created_at TEXT NOT NULL
     )`,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE,
+      post_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
+      dm_thread_id INTEGER REFERENCES dm_threads(id) ON DELETE CASCADE,
+      body TEXT NOT NULL,
+      excerpt TEXT NOT NULL DEFAULT '',
+      read_at TEXT,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      blocked_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (blocker_id, blocked_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_settings (
+      user_id INTEGER NOT NULL PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      notify_reply BOOLEAN NOT NULL DEFAULT TRUE,
+      notify_mention BOOLEAN NOT NULL DEFAULT TRUE,
+      notify_like BOOLEAN NOT NULL DEFAULT TRUE,
+      notify_dm BOOLEAN NOT NULL DEFAULT TRUE
+    )`,
+    `CREATE TABLE IF NOT EXISTS user_warnings (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
     `CREATE TABLE IF NOT EXISTS report_reasons (
       id SERIAL PRIMARY KEY,
       label TEXT NOT NULL UNIQUE,
@@ -325,7 +408,10 @@ const pg = {
       site_name TEXT NOT NULL DEFAULT '',
       site_description TEXT NOT NULL DEFAULT '',
       site_notice TEXT NOT NULL DEFAULT '',
-      site_footer TEXT NOT NULL DEFAULT ''
+      site_footer TEXT NOT NULL DEFAULT '',
+      dm_min_credit INTEGER NOT NULL DEFAULT 0,
+      credit_max INTEGER NOT NULL DEFAULT 1000,
+      credit_recover_minutes INTEGER NOT NULL DEFAULT 0
     )`,
   ],
   patches: [
@@ -348,6 +434,16 @@ const pg = {
     `ALTER TABLE users ADD COLUMN github_id TEXT`,
     `ALTER TABLE threads ADD COLUMN external_id TEXT`,
     `ALTER TABLE posts ADD COLUMN external_id TEXT`,
+    // Notification preview text; empty on rows created before it existed.
+    `ALTER TABLE notifications ADD COLUMN excerpt TEXT NOT NULL DEFAULT ''`,
+    // Seeded administrator group; older databases adopt it on boot.
+    `ALTER TABLE user_groups ADD COLUMN builtin BOOLEAN NOT NULL DEFAULT FALSE`,
+    // Minimum credit for private messages; 0 disables the requirement.
+    `ALTER TABLE settings ADD COLUMN dm_min_credit INTEGER NOT NULL DEFAULT 0`,
+    // Ceiling for credit awards; 0 disables the ceiling.
+    `ALTER TABLE settings ADD COLUMN credit_max INTEGER NOT NULL DEFAULT 1000`,
+    // Automatic credit recovery interval in minutes; 0 disables it.
+    `ALTER TABLE settings ADD COLUMN credit_recover_minutes INTEGER NOT NULL DEFAULT 0`,
   ],
   indexes: [
     `CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category_id)`,
@@ -367,6 +463,8 @@ const pg = {
     `CREATE INDEX IF NOT EXISTS idx_dm_participants_user ON dm_participants(user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_dm_messages_thread ON dm_messages(thread_id)`,
     `CREATE INDEX IF NOT EXISTS idx_drafts_author ON drafts(author_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_user_warnings_user ON user_warnings(user_id)`,
   ],
 }
 
@@ -411,6 +509,7 @@ const mysql = {
       name VARCHAR(191) NOT NULL,
       color VARCHAR(7) NOT NULL,
       position INT NOT NULL DEFAULT 0,
+      builtin TINYINT(1) NOT NULL DEFAULT 0,
       UNIQUE KEY uq_user_groups_name (name)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS categories (
@@ -517,6 +616,51 @@ const mysql = {
       CONSTRAINT fk_dm_messages_thread FOREIGN KEY (thread_id) REFERENCES dm_threads(id) ON DELETE CASCADE,
       CONSTRAINT fk_dm_messages_author FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      type VARCHAR(32) NOT NULL,
+      actor_id INT NULL,
+      thread_id INT NULL,
+      post_id INT NULL,
+      dm_thread_id INT NULL,
+      body TEXT NOT NULL,
+      excerpt VARCHAR(500) NOT NULL DEFAULT '',
+      read_at VARCHAR(40) NULL,
+      created_at VARCHAR(40) NOT NULL,
+      KEY idx_notifications_user (user_id, created_at),
+      CONSTRAINT fk_notifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      CONSTRAINT fk_notifications_actor FOREIGN KEY (actor_id) REFERENCES users(id) ON DELETE SET NULL,
+      CONSTRAINT fk_notifications_thread FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE,
+      CONSTRAINT fk_notifications_post FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
+      CONSTRAINT fk_notifications_dm FOREIGN KEY (dm_thread_id) REFERENCES dm_threads(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS user_blocks (
+      blocker_id INT NOT NULL,
+      blocked_id INT NOT NULL,
+      created_at VARCHAR(40) NOT NULL,
+      PRIMARY KEY (blocker_id, blocked_id),
+      CONSTRAINT fk_user_blocks_blocker FOREIGN KEY (blocker_id) REFERENCES users(id) ON DELETE CASCADE,
+      CONSTRAINT fk_user_blocks_blocked FOREIGN KEY (blocked_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS user_settings (
+      user_id INT NOT NULL PRIMARY KEY,
+      notify_reply TINYINT(1) NOT NULL DEFAULT 1,
+      notify_mention TINYINT(1) NOT NULL DEFAULT 1,
+      notify_like TINYINT(1) NOT NULL DEFAULT 1,
+      notify_dm TINYINT(1) NOT NULL DEFAULT 1,
+      CONSTRAINT fk_user_settings_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
+    `CREATE TABLE IF NOT EXISTS user_warnings (
+      id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      admin_id INT NULL,
+      reason TEXT NOT NULL,
+      created_at VARCHAR(40) NOT NULL,
+      KEY idx_user_warnings_user (user_id),
+      CONSTRAINT fk_user_warnings_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      CONSTRAINT fk_user_warnings_admin FOREIGN KEY (admin_id) REFERENCES users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
     `CREATE TABLE IF NOT EXISTS report_reasons (
       id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
       label VARCHAR(191) NOT NULL,
@@ -541,6 +685,9 @@ const mysql = {
       site_description VARCHAR(500) NOT NULL DEFAULT '',
       site_notice VARCHAR(2000) NOT NULL DEFAULT '',
       site_footer VARCHAR(500) NOT NULL DEFAULT '',
+      dm_min_credit INT NOT NULL DEFAULT 0,
+      credit_max INT NOT NULL DEFAULT 1000,
+      credit_recover_minutes INT NOT NULL DEFAULT 0,
       CONSTRAINT chk_settings_single CHECK (id = 1)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
   ],
@@ -567,6 +714,16 @@ const mysql = {
     `ALTER TABLE users ADD COLUMN github_id VARCHAR(191) NULL`,
     `ALTER TABLE threads ADD COLUMN external_id VARCHAR(191) NULL`,
     `ALTER TABLE posts ADD COLUMN external_id VARCHAR(191) NULL`,
+    // Notification preview text; empty on rows created before it existed.
+    `ALTER TABLE notifications ADD COLUMN excerpt VARCHAR(500) NOT NULL DEFAULT ''`,
+    // Seeded administrator group; older databases adopt it on boot.
+    `ALTER TABLE user_groups ADD COLUMN builtin TINYINT(1) NOT NULL DEFAULT 0`,
+    // Minimum credit for private messages; 0 disables the requirement.
+    `ALTER TABLE settings ADD COLUMN dm_min_credit INT NOT NULL DEFAULT 0`,
+    // Ceiling for credit awards; 0 disables the ceiling.
+    `ALTER TABLE settings ADD COLUMN credit_max INT NOT NULL DEFAULT 1000`,
+    // Automatic credit recovery interval in minutes; 0 disables it.
+    `ALTER TABLE settings ADD COLUMN credit_recover_minutes INT NOT NULL DEFAULT 0`,
   ],
   // Tolerant: MySQL has no CREATE INDEX IF NOT EXISTS, so a re-run just fails.
   indexes: [

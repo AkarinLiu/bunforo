@@ -4,11 +4,15 @@ import Auth from './pages/Auth.vue'
 import BindEmail from './pages/BindEmail.vue'
 import Category from './pages/Category.vue'
 import Drafts from './pages/Drafts.vue'
+import Feeds from './pages/Feeds.vue'
 import Home from './pages/Home.vue'
 import Messages from './pages/Messages.vue'
 import NewThread from './pages/NewThread.vue'
+import Notifications from './pages/Notifications.vue'
+import Placeholder from './pages/Placeholder.vue'
 import Profile from './pages/Profile.vue'
 import Reset from './pages/Reset.vue'
+import Settings from './pages/Settings.vue'
 import Setup from './pages/Setup.vue'
 import Thread from './pages/Thread.vue'
 import { meta, loadMeta } from './meta'
@@ -35,7 +39,46 @@ export const router = createRouter({
     { path: '/u/:username', name: 'profile', component: Profile, props: true },
     { path: '/messages/:id?', name: 'messages', component: Messages },
     { path: '/drafts', name: 'drafts', component: Drafts },
+    { path: '/settings', name: 'settings', component: Settings },
+    { path: '/feeds', name: 'feeds', component: Feeds },
+    { path: '/notifications', name: 'notifications', component: Notifications },
     { path: '/admin', name: 'admin', component: Admin },
+    {
+      path: '/review',
+      name: 'review',
+      component: Placeholder,
+      meta: { title: '审核队列', description: '集中处理待审核的主题与举报。' },
+    },
+    {
+      path: '/achievements',
+      name: 'achievements',
+      component: Placeholder,
+      meta: { title: '成就', description: '查看你在社区里解锁的成就。' },
+    },
+    {
+      path: '/activity',
+      name: 'activity',
+      component: Placeholder,
+      meta: { title: '近期活动', description: '社区里最近发生的讨论与回复。' },
+    },
+    {
+      path: '/invites',
+      name: 'invites',
+      component: Placeholder,
+      meta: { title: '邀请', description: '邀请朋友加入这个社区。' },
+    },
+    {
+      path: '/ai',
+      name: 'ai',
+      component: Placeholder,
+      meta: { title: 'AI 机器人', description: '让机器人参与讨论、回答问题。' },
+    },
+    {
+      path: '/boards',
+      name: 'boards',
+      component: Placeholder,
+      meta: { title: '看板', description: '以看板视图浏览各个版块的主题。' },
+    },
     { path: '/setup', name: 'setup', component: Setup },
     { path: '/bind-email', name: 'bind-email', component: BindEmail },
     { path: '/:pathMatch(.*)*', redirect: '/' },
@@ -64,8 +107,12 @@ router.beforeEach(async (to) => {
   }
   if (meta.requireEmail && auth.user && !auth.user.emailVerified) return { path: '/bind-email' }
 
-  // 私信 and 草稿箱 are members-only, so make sure the session is known first.
-  const membersOnly = to.name === 'messages' || to.name === 'drafts'
+  // 私信、草稿箱 and 通知 are members-only, so make sure the session is known first.
+  const membersOnly =
+    to.name === 'messages' ||
+    to.name === 'drafts' ||
+    to.name === 'notifications' ||
+    to.name === 'settings'
   if (membersOnly && !auth.loaded) await refreshSession()
   if (membersOnly && !auth.user) return { path: '/login' }
 })

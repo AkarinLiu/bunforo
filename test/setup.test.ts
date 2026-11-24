@@ -50,12 +50,18 @@ describe('first-run setup', () => {
       siteDescription: '一个测试站点',
       siteNotice: '',
       siteFooter: '',
+      dmMinCredit: 0,
+      creditMax: 1000,
+      creditRecoverMinutes: 0,
     })
     expect(r.updatedSettings).toEqual({
       siteName: '再改',
       siteDescription: 'x',
       siteNotice: '',
       siteFooter: '',
+      dmMinCredit: 0,
+      creditMax: 1000,
+      creditRecoverMinutes: 0,
     })
 
     // Now initialized, and locked against a second run.

@@ -155,12 +155,18 @@ describe('site texts', () => {
       siteDescription: '简介',
       siteNotice: '公告 **加粗**',
       siteFooter: '© 测试',
+      dmMinCredit: 80,
+      creditMax: 500,
+      creditRecoverMinutes: 30,
     })
     expect(await repo.getSettings()).toEqual({
       siteName: '测试站',
       siteDescription: '简介',
       siteNotice: '公告 **加粗**',
       siteFooter: '© 测试',
+      dmMinCredit: 80,
+      creditMax: 500,
+      creditRecoverMinutes: 30,
     })
     // The public status endpoint the header/home/footer read from.
     const status = (await (await app.request('/api/setup/status')).json()) as {

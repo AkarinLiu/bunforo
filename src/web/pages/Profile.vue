@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { errMessage, http, uploadFile } from '../api'
-import type { ProfileResponse, ThreadsResponse } from '../api'
+import type { ProfileBan, ProfileResponse, ThreadsResponse } from '../api'
 import type { PublicUser, SelfUser, ThreadRow } from '../../shared/types'
 import { auth, groupById } from '../store'
 import EmailBindCard from '../components/EmailBindCard.vue'
@@ -11,6 +11,7 @@ import UserGroupBadge from '../components/UserGroupBadge.vue'
 const props = defineProps<{ username: string }>()
 
 const user = ref<PublicUser | null>(null)
+const ban = ref<ProfileBan | null>(null)
 const threadCount = ref(0)
 const postCount = ref(0)
 const threads = ref<ThreadRow[]>([])
@@ -31,6 +32,27 @@ function isSelf(): boolean {
 
 const userGroup = computed(() => groupById(user.value?.groupId))
 
+/** "永久封禁" or "2026-12-01 08:00 结束 · 剩余 3 天". */
+const banDuration = computed(() => {
+  const current = ban.value
+  if (!current) return ''
+  if (!current.until) return '永久封禁'
+  const left = Date.parse(current.until) - Date.now()
+  if (!Number.isFinite(left) || left <= 0) return '即将结束'
+  const hours = Math.ceil(left / 3_600_000)
+  const remaining = hours < 24 ? `${hours} 小时` : `${Math.ceil(hours / 24)} 天`
+  return `${time(current.until)} 结束 · 剩余 ${remaining}`
+})
+
+/**
+ * While editing, the header shows the draft name/avatar — otherwise a
+ * just-uploaded avatar is invisible until the form is saved.
+ */
+const previewUser = computed(() => ({
+  displayName: displayName.value || user.value?.displayName || '?',
+  avatarUrl: editing.value ? avatarUrl.value : (user.value?.avatarUrl ?? ''),
+}))
+
 async function load(): Promise<void> {
   loading.value = true
   error.value = ''
@@ -38,6 +60,7 @@ async function load(): Promise<void> {
   try {
     const profile = await http.get<ProfileResponse>(`/users/${encodeURIComponent(props.username)}`)
     user.value = profile.user
+    ban.value = profile.ban ?? null
     threadCount.value = profile.threadCount
     postCount.value = profile.postCount
     displayName.value = profile.user.displayName
@@ -90,6 +113,7 @@ async function onAvatarPick(event: Event): Promise<void> {
     // Only fills the field; the form still has to be saved, so an accidental
     // pick is undoable.
     avatarUrl.value = url
+    notice.value = '头像已上传，保存资料后生效'
   } catch (err) {
     error.value = errMessage(err, '上传失败')
   } finally {
@@ -130,13 +154,17 @@ const joined = (iso: string) => iso.slice(0, 10)
       <p v-if="notice" class="form-ok">{{ notice }}</p>
 
       <section class="card card-pad profile-head">
-        <UserAvatar :user="user" :size="64" />
+        <UserAvatar :user="previewUser" :size="64" />
 
         <div class="profile-id">
           <h1 style="font-size: 24px">{{ user.displayName }}</h1>
           <div class="muted" style="margin-top: 4px">
             @{{ user.username }}
-            <span v-if="user.role === 'admin'" class="pill pill-accent" style="margin-left: 6px">
+            <span
+              v-if="user.role === 'admin' && !userGroup?.builtin"
+              class="pill pill-accent"
+              style="margin-left: 6px"
+            >
               管理员
             </span>
             <UserGroupBadge :group="userGroup" style="margin-left: 6px" />
@@ -177,6 +205,16 @@ const joined = (iso: string) => iso.slice(0, 10)
         </div>
       </section>
 
+      <section v-if="ban" class="card card-pad ban-banner">
+        <div class="ban-banner-head">
+          <span class="pill pill-danger">已封禁</span>
+          <span class="ban-banner-duration">{{ banDuration }}</span>
+        </div>
+        <p class="ban-banner-reason">
+          <span class="faint">理由：</span>{{ ban.reason || '未填写理由' }}
+        </p>
+      </section>
+
       <EmailBindCard v-if="isSelf()" style="margin-top: 16px" />
 
       <form
@@ -198,7 +236,7 @@ const joined = (iso: string) => iso.slice(0, 10)
           <div class="avatar-row">
             <input
               v-model="avatarUrl"
-              type="url"
+              type="text"
               maxlength="512"
               placeholder="https://… 或上传一张"
             />

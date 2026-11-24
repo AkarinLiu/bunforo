@@ -16,7 +16,7 @@ import type { Context, MiddlewareHandler } from 'hono'
 import { clearExpiredBan, findUserById } from '../db/repo'
 import { mailConfigured } from './mailer'
 import { toSelfUser } from '../shared/types'
-import type { PublicUser, SelfUser } from '../shared/types'
+import type { SelfUser } from '../shared/types'
 
 // Deliberately unchanged by the BunForo rename: a new cookie name would log
 // every existing session out. This literal is a compatibility key, not branding.
@@ -52,7 +52,9 @@ export const session: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (user && (await clearExpiredBan(user))) {
     user = { ...user, banned: false, banReason: '', bannedUntil: null }
   }
-  c.set('user', user && !user.banned ? toSelfUser(user) : null)
+  // Banned accounts stay signed in: they may read and message administrators,
+  // while every content write is refused by the routes.
+  c.set('user', user ? toSelfUser(user) : null)
   await next()
 }
 
@@ -95,9 +97,12 @@ export async function takeOauthStateCookie(c: Context): Promise<string | null> {
 
 export const currentUser = (c: Context<AppEnv>): SelfUser | null => c.get('user')
 
-/** Owners may remove their own content; admins may remove anything. */
-export const canManage = (user: PublicUser, ownerId: number): boolean =>
-  user.role === 'admin' || user.id === ownerId
+/**
+ * Owners may remove their own content; admins may remove anything. A banned
+ * admin loses the moderation half but keeps control of their own posts.
+ */
+export const canManage = (user: SelfUser, ownerId: number): boolean =>
+  (user.role === 'admin' && !user.banned) || user.id === ownerId
 
 /**
  * Forced email binding: on only when the operator asked for it AND mail can

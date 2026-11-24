@@ -11,9 +11,16 @@
  */
 import { Hono } from 'hono'
 import type { Context, MiddlewareHandler } from 'hono'
+import { streamSSE } from 'hono/streaming'
 import * as repo from '../db/repo'
 import { SYSTEM_USER_ID, toPublicUser, toSelfUser } from '../shared/types'
-import type { EmailTokenKind, Role } from '../shared/types'
+import type {
+  EmailTokenKind,
+  NotificationRow,
+  NotificationType,
+  SelfUser,
+  UserSettings,
+} from '../shared/types'
 import {
   canManage,
   currentUser,
@@ -24,13 +31,14 @@ import {
   takeOauthStateCookie,
 } from './auth'
 import type { AppEnv } from './auth'
+import { publishToAll, publishToUser, publishToUsers, subscribe } from './events'
 import { sniff } from './filetype'
+import { plainText } from './plaintext'
 import * as github from './github'
 import * as mailer from './mailer'
 import * as storage from './storage'
 
 const USERNAME_RE = /^[\p{L}\p{N}_]{2,32}$/u
-const ROLE_RE = /^(user|admin)$/
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 type ErrStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 502
@@ -143,10 +151,25 @@ const requireAuth: MiddlewareHandler<AppEnv> = async (c, next) => {
   if (!c.get('user')) return c.json({ error: '请先登录' }, 401)
   await next()
 }
+/** Banned accounts are read-only except for private messages to administrators. */
+const BANNED_WRITE = '账号已被封禁，暂时无法发布内容'
+const BANNED_DM = '账号已被封禁，只能与管理员私信'
+
+/**
+ * Private messages need a minimum credit score. Admins are exempt, and so is a
+ * banned account: its only remaining channel is the appeal DM to staff.
+ */
+async function dmCreditError(user: SelfUser): Promise<string | null> {
+  if (user.role === 'admin' || user.banned) return null
+  const { dmMinCredit } = await repo.getSettings()
+  if (dmMinCredit <= 0 || user.credit >= dmMinCredit) return null
+  return `信用分不足，无法使用私信（需要 ${dmMinCredit} 分，当前 ${user.credit} 分）`
+}
+
 const adminOnly: MiddlewareHandler<AppEnv> = async (c, next) => {
   const user = c.get('user')
   if (!user) return c.json({ error: '请先登录' }, 401)
-  if (user.role !== 'admin') return c.json({ error: '需要管理员权限' }, 403)
+  if (user.role !== 'admin' || user.banned) return c.json({ error: '需要管理员权限' }, 403)
   await next()
 }
 
@@ -221,7 +244,7 @@ api.post('/auth/login', async (c) => {
   const hash = user?.passwordHash || (dummyHash ??= await Bun.password.hash('bunforo-nonexistent-user'))
   const ok = await Bun.password.verify(password, hash)
   if (!user || !ok) return fail(c, '用户名或密码错误', 401)
-  if (user.banned) return fail(c, '该账号已被封禁', 403)
+  // Banned accounts log in into restricted mode: read-only plus admin DMs.
 
   await startSession(c, user.id, user.sessionVersion)
   return c.json({ user: toSelfUser(user) })
@@ -348,13 +371,15 @@ api.post('/auth/reset-password', async (c) => {
 // ------------------------------------------------------------------- meta
 
 /** Public server capabilities the UI keys off — booleans, never secrets. */
-api.get('/meta', (c) =>
-  c.json({
+api.get('/meta', async (c) => {
+  const settings = await repo.getSettings()
+  return c.json({
     mailConfigured: mailer.mailConfigured(),
     requireEmail: emailBindingRequired(),
     githubOAuth: github.oauthConfigured(),
-  }),
-)
+    dmMinCredit: settings.dmMinCredit,
+  })
+})
 
 // ------------------------------------------------------------ categories
 
@@ -418,6 +443,7 @@ api.post('/threads/:id/view', async (c) => {
 
 api.post('/threads', requireAuth, async (c) => {
   const user = c.get('user')!
+  if (user.banned) return fail(c, BANNED_WRITE, 403)
   const b = await readJson(c)
   const categoryId = Number(b.categoryId)
   const title = str(b.title).trim()
@@ -436,6 +462,21 @@ api.post('/threads', requireAuth, async (c) => {
 
   const id = await repo.createThread({ categoryId, authorId: user.id, title, body: content, tagIds })
 
+  const created = await repo.findThread(id)
+  if (created) publishToAll('thread:created', created)
+
+  const openingPostId = await repo.findOpeningPostId(id)
+  if (openingPostId) {
+    await notifyMentions({
+      body: content,
+      actor: user,
+      threadId: id,
+      postId: openingPostId,
+      threadTitle: title,
+      skip: new Set([user.id]),
+    })
+  }
+
   // Publishing from the draft box consumes the draft. Best-effort: the thread
   // already exists, so a failure here leaves a stale draft, never lost content.
   const draftId = Number(b.draftId)
@@ -448,6 +489,7 @@ api.post('/threads', requireAuth, async (c) => {
 
 api.post('/threads/:id/posts', requireAuth, async (c) => {
   const user = c.get('user')!
+  if (user.banned) return fail(c, BANNED_WRITE, 403)
   const threadId = idOf(c)
   if (!threadId) return fail(c, '无效的主题 ID', 404)
 
@@ -465,6 +507,47 @@ api.post('/threads/:id/posts', requireAuth, async (c) => {
   if (!parent || parent.threadId !== threadId) return fail(c, '回复目标不存在', 404)
 
   const id = await repo.createPost({ threadId, authorId: user.id, parentId, body: content })
+
+  const post = await repo.findPostHydrated(id)
+  if (post) publishToAll('thread:post', { threadId, post })
+
+  // One notice per person: the thread author and the direct parent's author are
+  // usually the same, and a mention must not double-notify them.
+  // A recipient only joins the skip set when a notice was actually written:
+  // muting "回复" must not also swallow a deliberate @提及.
+  const notified = new Set<number>([user.id])
+  if (thread.authorId !== user.id) {
+    const sent = await notifyUser({
+      userId: thread.authorId,
+      type: 'reply',
+      actor: user,
+      body: user.displayName + ' 回复了你的主题「' + clip(thread.title) + '」',
+      excerpt: content,
+      threadId,
+      postId: id,
+    })
+    if (sent) notified.add(thread.authorId)
+  }
+  if (parent.authorId !== user.id && !notified.has(parent.authorId)) {
+    const sent = await notifyUser({
+      userId: parent.authorId,
+      type: 'reply',
+      actor: user,
+      body: user.displayName + ' 回复了你的帖子「' + clip(thread.title) + '」',
+      excerpt: content,
+      threadId,
+      postId: id,
+    })
+    if (sent) notified.add(parent.authorId)
+  }
+  await notifyMentions({
+    body: content,
+    actor: user,
+    threadId,
+    postId: id,
+    threadTitle: thread.title,
+    skip: notified,
+  })
   return c.json({ id }, 201)
 })
 
@@ -503,8 +586,22 @@ api.post('/posts/:id/like', requireAuth, async (c) => {
   const user = c.get('user')!
   const id = idOf(c)
   if (!id) return fail(c, '无效的帖子 ID', 404)
-  if (!(await repo.findPost(id))) return fail(c, '帖子不存在', 404)
-  return c.json(await repo.toggleLike(id, user.id))
+  const post = await repo.findPost(id)
+  if (!post) return fail(c, '帖子不存在', 404)
+  const result = await repo.toggleLike(id, user.id)
+  if (result.liked && post.authorId !== user.id) {
+    const thread = await repo.findThread(post.threadId)
+    await notifyUser({
+      userId: post.authorId,
+      type: 'like',
+      actor: user,
+      body: user.displayName + ' 赞了你在「' + clip(thread?.title ?? '主题') + '」中的回复',
+      excerpt: post.body,
+      threadId: post.threadId,
+      postId: id,
+    })
+  }
+  return c.json(result)
 })
 
 // -------------------------------------------------------------- reports
@@ -602,6 +699,89 @@ api.patch('/users/me', requireAuth, async (c) => {
 
   await repo.updateUserProfile(user.id, { displayName, bio, avatarUrl })
   return c.json({ user: { ...user, displayName, bio, avatarUrl } })
+})
+
+// --------------------------------------------------------------- blocks
+
+/** The viewer's blacklist, newest members resolved to public profiles. */
+api.get('/users/me/blocks', requireAuth, async (c) =>
+  c.json(await repo.listBlockedUsers(c.get('user')!.id)),
+)
+
+api.post('/users/me/blocks', requireAuth, async (c) => {
+  const user = c.get('user')!
+  const b = await readJson(c)
+  const name = str(b.username).trim().replace(/^@/, '')
+  if (!name) return fail(c, '请填写用户名')
+  const target = await repo.findUserByUsername(name)
+  if (!target || target.id <= 0) return fail(c, '用户不存在', 404)
+  if (target.id === user.id) return fail(c, '不能拉黑自己')
+  // Blocking twice is a no-op: the button may be double-clicked.
+  if (!(await repo.isBlocked(user.id, target.id))) await repo.blockUser(user.id, target.id)
+  return c.json({ ok: true })
+})
+
+api.delete('/users/me/blocks/:id', requireAuth, async (c) => {
+  const user = c.get('user')!
+  const id = idOf(c)
+  if (!id) return fail(c, '无效的用户 ID', 404)
+  await repo.unblockUser(user.id, id)
+  return c.json({ ok: true })
+})
+
+// ------------------------------------------------------- user settings
+
+api.get('/users/me/settings', requireAuth, async (c) =>
+  c.json(await repo.getUserSettings(c.get('user')!.id)),
+)
+
+/**
+ * Partial update: a field the client omits keeps its current value, so an old
+ * client that only knows one switch cannot reset the others.
+ */
+api.patch('/users/me/settings', requireAuth, async (c) => {
+  const user = c.get('user')!
+  const b = await readJson(c)
+  const current = await repo.getUserSettings(user.id)
+  const pick = (value: unknown, fallback: boolean): boolean =>
+    typeof value === 'boolean' ? value : fallback
+  const settings: UserSettings = {
+    notifyReply: pick(b.notifyReply, current.notifyReply),
+    notifyMention: pick(b.notifyMention, current.notifyMention),
+    notifyLike: pick(b.notifyLike, current.notifyLike),
+    notifyDm: pick(b.notifyDm, current.notifyDm),
+  }
+  await repo.saveUserSettings(user.id, settings)
+  return c.json(settings)
+})
+
+/**
+ * Changes the password after verifying the current one. The reset bumps the
+ * session version (logging out every other device), so this tab's cookie is
+ * re-issued — otherwise the person who just proved the old password would be
+ * signed out too.
+ */
+api.post('/users/me/password', requireAuth, async (c) => {
+  const viewer = c.get('user')!
+  const b = await readJson(c)
+  const current = str(b.currentPassword)
+  const next = str(b.newPassword)
+  if (next.length < 8) return fail(c, '新密码至少 8 位')
+  if (next.length > 128) return fail(c, '新密码最长 128 位')
+  if (next === current) return fail(c, '新密码不能与当前密码相同')
+
+  const user = await repo.findUserById(viewer.id)
+  if (!user) return fail(c, '用户不存在', 404)
+  // GitHub/import placeholders carry an empty hash — no password to verify.
+  if (!user.passwordHash) return fail(c, '该账号未设置密码，请使用 GitHub 登录')
+  if (!(await Bun.password.verify(current, user.passwordHash))) {
+    return fail(c, '当前密码不正确')
+  }
+
+  await repo.resetUserPassword(user.id, await Bun.password.hash(next))
+  const updated = await repo.findUserById(user.id)
+  await startSession(c, user.id, updated?.sessionVersion ?? user.sessionVersion + 1)
+  return c.json({ ok: true })
 })
 
 /**
@@ -705,13 +885,188 @@ function userFromPath(c: Context) {
 api.get('/users/:username', async (c) => {
   const user = await userFromPath(c)
   if (!user) return fail(c, '用户不存在', 404)
-  return c.json({ user: toPublicUser(user), ...(await repo.authorStats(user.id)) })
+  // A temporary ban that has run out must not be displayed (or enforced) any
+  // more; this is the same self-healing the session middleware does.
+  if (await repo.clearExpiredBan(user)) {
+    user.banned = false
+    user.banReason = ''
+    user.bannedUntil = null
+  }
+  // Ban details are intentionally exposed only on this endpoint: PublicUser
+  // (posts, notifications, author fields) never carries them.
+  const ban = user.banned ? { reason: user.banReason, until: user.bannedUntil } : null
+  return c.json({ user: toPublicUser(user), ...(await repo.authorStats(user.id)), ban })
 })
 
 api.get('/users/:username/threads', async (c) => {
   const user = await userFromPath(c)
   if (!user) return fail(c, '用户不存在', 404)
   return c.json(await repo.listThreadsByAuthor(user.id, 50))
+})
+
+// -------------------------------------------------- live events & notices
+
+/** Pre-rendered inbox lines stay short; thread titles are attacker-controlled. */
+const clip = (text: string, max = 48): string =>
+  text.length > max ? text.slice(0, max - 1) + '…' : text
+
+const MENTION_RE = /@([\p{L}\p{N}_]{2,32})/gu
+
+function actorOf(user: SelfUser): NonNullable<NotificationRow['actor']> {
+  return {
+    id: user.id,
+    username: user.username,
+    displayName: user.displayName,
+    avatarUrl: user.avatarUrl,
+  }
+}
+
+/** Which switch can silence a given notice; system notices are always written. */
+const NOTIFICATION_PREF: Record<NotificationType, keyof UserSettings | null> = {
+  reply: 'notifyReply',
+  mention: 'notifyMention',
+  like: 'notifyLike',
+  dm: 'notifyDm',
+  // Policy messages are always delivered: a muted bell must not hide a ban or
+  // an official warning.
+  warning: null,
+  ban: null,
+  system: null,
+}
+
+/** Writes one inbox row and pushes it to every open tab of the recipient. */
+async function notifyUser(opts: {
+  userId: number
+  type: NotificationType
+  actor: SelfUser
+  body: string
+  /** the reply/message itself; flattened into a one-line preview */
+  excerpt?: string
+  threadId?: number
+  postId?: number
+  dmThreadId?: number
+}): Promise<boolean> {
+  if (!opts.userId || opts.userId === opts.actor.id) return false
+  const pref = NOTIFICATION_PREF[opts.type]
+  if (pref && !(await repo.getUserSettings(opts.userId))[pref]) return false
+  const row = await repo.createNotification({
+    userId: opts.userId,
+    type: opts.type,
+    actorId: opts.actor.id,
+    threadId: opts.threadId,
+    postId: opts.postId,
+    dmThreadId: opts.dmThreadId,
+    body: opts.body,
+    excerpt: plainText(opts.excerpt ?? ''),
+  })
+  publishToUser(opts.userId, 'notification', { ...row, actor: actorOf(opts.actor) })
+  return true
+}
+
+/** One pre-rendered ban notice; `until` null means permanent. */
+async function notifyBan(
+  userId: number,
+  actor: SelfUser,
+  reason: string,
+  until: string | null,
+): Promise<void> {
+  const duration = until ? '至 ' + until.replace('T', ' ').slice(0, 16) : '永久封禁'
+  await notifyUser({
+    userId,
+    type: 'ban',
+    actor,
+    body: '账号已被封禁' + (reason ? '：' + clip(reason) : '') + ' · ' + duration,
+  })
+}
+
+/**
+ * Notifies @name mentions once per post. Unknown names, the author and anyone
+ * already notified for this post (skip) are ignored; five mentions at most.
+ */
+async function notifyMentions(opts: {
+  body: string
+  actor: SelfUser
+  threadId: number
+  postId: number
+  threadTitle: string
+  skip: Set<number>
+}): Promise<void> {
+  const names = new Set<string>()
+  for (const match of opts.body.matchAll(MENTION_RE)) {
+    if (match[1]) names.add(match[1])
+    if (names.size >= 5) break
+  }
+  for (const name of names) {
+    const target = await repo.findUserByUsername(name)
+    if (!target || target.id <= 0 || target.id === opts.actor.id || opts.skip.has(target.id)) continue
+    // A blocked member cannot reach the blocker through a mention.
+    if (await repo.isBlocked(target.id, opts.actor.id)) continue
+    opts.skip.add(target.id)
+    await notifyUser({
+      userId: target.id,
+      type: 'mention',
+      actor: opts.actor,
+      body: opts.actor.displayName + ' 在「' + clip(opts.threadTitle) + '」中提到了你',
+      excerpt: opts.body,
+      threadId: opts.threadId,
+      postId: opts.postId,
+    })
+  }
+}
+
+/**
+ * Live stream for the signed-in user. EventSource reconnects on its own after
+ * a drop; the heartbeat keeps proxies (and Bun's own idle timeout, 10s by
+ * default) from closing a quiet connection, and lets the server notice a dead
+ * client on the next write. Keep it comfortably below 10s.
+ */
+api.get('/events', requireAuth, (c) => {
+  const user = c.get('user')!
+  return streamSSE(c, async (stream) => {
+    let closed = false
+    stream.onAbort(() => {
+      closed = true
+    })
+    const unsubscribe = subscribe(user.id, (event, data) => {
+      void stream
+        .writeSSE({ event, data: JSON.stringify(data) })
+        .catch(() => {
+          closed = true
+        })
+    })
+    try {
+      await stream.writeSSE({ event: 'ready', data: String(Date.now()) })
+      while (!closed) {
+        await stream.sleep(5000)
+        if (!closed) await stream.writeSSE({ event: 'ping', data: String(Date.now()) })
+      }
+    } finally {
+      unsubscribe()
+    }
+  })
+})
+
+// ---------------------------------------------------------- notifications
+
+/** The inbox: newest 30 rows plus the unread badge count. */
+api.get('/notifications', requireAuth, async (c) => {
+  const user = c.get('user')!
+  const [items, unread] = await Promise.all([
+    repo.listNotifications(user.id),
+    repo.countUnreadNotifications(user.id),
+  ])
+  return c.json({ items, unread })
+})
+
+/** Marks specific ids read, or the whole inbox when ids is omitted/empty. */
+api.post('/notifications/read', requireAuth, async (c) => {
+  const user = c.get('user')!
+  const b = await readJson(c)
+  const ids = Array.isArray(b.ids)
+    ? b.ids.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+    : []
+  await repo.markNotificationsRead(user.id, ids)
+  return c.json({ unread: await repo.countUnreadNotifications(user.id) })
 })
 
 // ------------------------------------------------------- private messages
@@ -734,6 +1089,8 @@ api.get('/dm', requireAuth, async (c) => c.json(await repo.listDmThreads(c.get('
 
 api.post('/dm/threads', requireAuth, async (c) => {
   const user = c.get('user')!
+  const creditError = await dmCreditError(user)
+  if (creditError) return fail(c, creditError, 403)
   const b = await readJson(c)
   const title = str(b.title).trim()
   const body = str(b.body).trim()
@@ -742,8 +1099,32 @@ api.post('/dm/threads', requireAuth, async (c) => {
 
   const participantIds = await resolveRecipients(b.participants, user.id)
   if (!participantIds.length) return fail(c, '请至少填写一个有效的收件人用户名')
+  for (const pid of participantIds) {
+    // The blocker's blacklist wins over everything: no DM may reach them.
+    if (await repo.isBlocked(pid, user.id)) return fail(c, '对方已将你拉黑，无法发送私信', 403)
+    if (user.banned && (await repo.findUserById(pid))?.role !== 'admin') {
+      return fail(c, BANNED_DM, 403)
+    }
+  }
 
   const id = await repo.createDmThread({ creatorId: user.id, title, participantIds, body })
+
+  const thread = await repo.findDmThread(id)
+  const messages = await repo.listDmMessages(id)
+  const opening = messages[messages.length - 1]
+  if (thread && opening) publishToUsers(participantIds, 'dm:message', { threadId: id, message: opening })
+  if (thread) {
+    for (const pid of participantIds) {
+      await notifyUser({
+        userId: pid,
+        type: 'dm',
+        actor: user,
+        body: user.displayName + ' 给你发来私信「' + clip(thread.title) + '」',
+        excerpt: body,
+        dmThreadId: id,
+      })
+    }
+  }
   return c.json({ id }, 201)
 })
 
@@ -764,15 +1145,51 @@ api.get('/dm/threads/:id', requireAuth, async (c) => {
 
 api.post('/dm/threads/:id/messages', requireAuth, async (c) => {
   const user = c.get('user')!
+  const creditError = await dmCreditError(user)
+  if (creditError) return fail(c, creditError, 403)
   const id = idOf(c)
   if (!id) return fail(c, '无效的私信 ID', 404)
   if (!(await repo.findDmThread(id)) || !(await repo.isDmParticipant(id, user.id))) {
     return fail(c, '私信不存在或无权访问', 404)
   }
+  // Two gates before the message is stored: a participant's blacklist, and a
+  // banned author who may only keep talking to staff.
+  const members = await repo.listDmParticipants(id)
+  for (const participant of members) {
+    if (participant.id === user.id) continue
+    if (await repo.isBlocked(participant.id, user.id)) {
+      return fail(c, '对方已将你拉黑，无法发送私信', 403)
+    }
+    if (user.banned && (await repo.findUserById(participant.id))?.role !== 'admin') {
+      return fail(c, BANNED_DM, 403)
+    }
+  }
   const b = await readJson(c)
   const body = str(b.body).trim()
   if (body.length < 1 || body.length > 20000) return fail(c, '内容不能为空，且不超过 20000 字')
-  return c.json({ id: await repo.createDmMessage({ threadId: id, authorId: user.id, body }) }, 201)
+  const messageId = await repo.createDmMessage({ threadId: id, authorId: user.id, body })
+
+  const [message, thread] = await Promise.all([
+    repo.findDmMessage(messageId),
+    repo.findDmThread(id),
+  ])
+  const others = members.map((p) => p.id).filter((pid) => pid !== user.id)
+  if (message) publishToUsers(others, 'dm:message', { threadId: id, message })
+  if (thread) {
+    for (const pid of others) {
+      // One unread bell row per conversation is enough; the badge carries the rest.
+      if (await repo.hasUnreadDmNotification(pid, id)) continue
+      await notifyUser({
+        userId: pid,
+        type: 'dm',
+        actor: user,
+        body: user.displayName + ' 在私信「' + clip(thread.title) + '」中发来消息',
+        excerpt: body,
+        dmThreadId: id,
+      })
+    }
+  }
+  return c.json({ id: messageId }, 201)
 })
 
 /** Clears the viewer's unread count for a conversation. */
@@ -782,6 +1199,8 @@ api.post('/dm/threads/:id/read', requireAuth, async (c) => {
   if (!id) return fail(c, '无效的私信 ID', 404)
   if (!(await repo.isDmParticipant(id, user.id))) return fail(c, '私信不存在或无权访问', 404)
   await repo.markDmRead(id, user.id)
+  // Opening the conversation also clears its unread bell row.
+  await repo.markDmNotificationsRead(user.id, id)
   return c.json({ ok: true })
 })
 
@@ -909,7 +1328,15 @@ api.post('/setup', async (c) => {
   })
   await startSession(c, id, 0)
   // Notice/footer start empty; an admin fills them in from 管理后台 → 站点.
-  await repo.saveSettings({ siteName, siteDescription, siteNotice: '', siteFooter: '' })
+  await repo.saveSettings({
+    siteName,
+    siteDescription,
+    siteNotice: '',
+    siteFooter: '',
+    dmMinCredit: 0,
+    creditMax: 1000,
+    creditRecoverMinutes: 0,
+  })
   for (const [index, name] of categories.entries()) {
     await repo.createCategory({ name, description: '', position: index, parentId: null })
   }
@@ -941,31 +1368,45 @@ api.patch('/admin/users/:id', async (c) => {
   if (typeof b.banned === 'boolean') {
     if (isSystem) return fail(c, '系统账号不可封禁', 403)
     if (b.banned && id === admin.id) return fail(c, '不能封禁自己')
-    await repo.setUserBan(id, {
-      banned: b.banned,
-      reason: str(b.banReason).trim().slice(0, 200),
-      until: normalizeUntil(b.bannedUntil),
-    })
+    const reason = str(b.banReason).trim().slice(0, 200)
+    const until = normalizeUntil(b.bannedUntil)
+    await repo.setUserBan(id, { banned: b.banned, reason, until })
+    // Only the switch into the banned state notifies; re-saving a ban or
+    // lifting one is silent.
+    if (b.banned && !target.banned) await notifyBan(id, admin, reason, until)
   }
-  if (typeof b.role === 'string') {
-    if (isSystem) return fail(c, '系统账号不可修改角色', 403)
-    if (!ROLE_RE.test(b.role)) return fail(c, '角色只能是 user 或 admin')
-    await repo.setUserRole(id, b.role as Role)
-  }
+  // Roles are not set directly any more: membership in the built-in 管理员
+  // group is what grants admin rights (see the groupId branch below).
   if (b.creditDelta != null) {
     if (isSystem) return fail(c, '系统账号不可调整信用分', 403)
     const delta = Number(b.creditDelta)
     if (!Number.isFinite(delta) || delta === 0 || Math.abs(delta) > 1000) {
       return fail(c, '无效的信用分调整')
     }
-    await repo.applyCredit(id, Math.trunc(delta))
+    const creditResult = await repo.applyCredit(id, Math.trunc(delta))
+    // Credit can auto-ban below the threshold; say so unless this same request
+    // already sent a ban notice.
+    if (creditResult.banned && !target.banned && !('banned' in b)) {
+      await notifyBan(id, admin, '信用分低于限制', null)
+    }
   }
   // `null`/`''` clears the membership; otherwise the group must exist.
+  // Group membership is authoritative: joining the built-in 管理员 group makes
+  // the account an admin, and any other group makes it a regular member.
   if ('groupId' in b) {
     if (isSystem) return fail(c, '系统账号不可设置用户组', 403)
     const groupId = b.groupId == null || b.groupId === '' ? null : Number(b.groupId)
-    if (groupId !== null && !(await repo.findGroup(groupId))) return fail(c, '用户组不存在', 404)
+    const group = groupId === null ? null : await repo.findGroup(groupId)
+    if (groupId !== null && !group) return fail(c, '用户组不存在', 404)
+
+    const becomesAdmin = group?.builtin === true
+    // The signed-in admin operates this very console; dropping their own group
+    // would revoke access on the next request (and lock a lone admin out).
+    if (id === admin.id && !becomesAdmin) {
+      return fail(c, '不能将自己移出管理员用户组')
+    }
     await repo.setUserGroup(id, groupId)
+    await repo.setUserRole(id, becomesAdmin ? 'admin' : 'user')
   }
   // Admin edit of a member's public profile. Only the fields present are
   // touched, so a partial patch never blanks the rest.
@@ -981,6 +1422,29 @@ api.patch('/admin/users/:id', async (c) => {
   }
   const user = await repo.findUserById(id)
   return c.json({ user: toPublicUser(user!) })
+})
+
+/** Official warning: recorded for the admin table and delivered as a notice. */
+api.post('/admin/users/:id/warn', async (c) => {
+  const admin = c.get('user')!
+  const id = Number(c.req.param('id'))
+  if (!Number.isInteger(id) || id <= 0) return fail(c, '无效的用户 ID', 404)
+  if (id === admin.id) return fail(c, '不能警告自己')
+  const target = await repo.findUserById(id)
+  if (!target) return fail(c, '用户不存在', 404)
+
+  const b = await readJson(c)
+  const reason = str(b.reason).trim()
+  if (reason.length < 1 || reason.length > 200) return fail(c, '警告理由需为 1-200 字')
+
+  const warningId = await repo.createWarning({ userId: id, adminId: admin.id, reason })
+  await notifyUser({
+    userId: id,
+    type: 'warning',
+    actor: admin,
+    body: '你收到一条管理员警告：' + reason,
+  })
+  return c.json({ id: warningId }, 201)
 })
 
 api.get('/admin/threads', async (c) => {
@@ -1111,6 +1575,8 @@ api.patch('/admin/groups/:id', async (c) => {
 
   const b = await readJson(c)
   const name = str(b.name).trim() || current.name
+  // Renaming a built-in group would break the "adopt by name" upgrade path.
+  if (current.builtin && name !== current.name) return fail(c, '内置用户组不能改名')
   const color = str(b.color).trim() || current.color
   const position = Number.isInteger(Number(b.position)) ? Number(b.position) : current.position
   if (name.length < 1 || name.length > 20) return fail(c, '用户组名长度需为 1-20 字')
@@ -1125,7 +1591,9 @@ api.patch('/admin/groups/:id', async (c) => {
 api.delete('/admin/groups/:id', async (c) => {
   const id = idOf(c)
   if (!id) return fail(c, '无效的用户组 ID', 404)
-  if (!(await repo.findGroup(id))) return fail(c, '用户组不存在', 404)
+  const group = await repo.findGroup(id)
+  if (!group) return fail(c, '用户组不存在', 404)
+  if (group.builtin) return fail(c, '内置用户组不能删除')
   await repo.deleteGroup(id)
   return c.json({ ok: true })
 })
@@ -1140,11 +1608,31 @@ api.patch('/admin/settings', async (c) => {
   const siteDescription = str(b.siteDescription).trim()
   const siteNotice = str(b.siteNotice).trim()
   const siteFooter = str(b.siteFooter).trim()
+  const dmMinCredit = Number.isInteger(Number(b.dmMinCredit))
+    ? Number(b.dmMinCredit)
+    : current.dmMinCredit
+  const creditMax = Number.isInteger(Number(b.creditMax)) ? Number(b.creditMax) : current.creditMax
+  const creditRecoverMinutes = Number.isInteger(Number(b.creditRecoverMinutes))
+    ? Number(b.creditRecoverMinutes)
+    : current.creditRecoverMinutes
   if (siteName.length > 50) return fail(c, '站点名称最长 50 字')
   if (siteDescription.length > 200) return fail(c, '站点简介最长 200 字')
   if (siteNotice.length > 2000) return fail(c, '公告最长 2000 字')
   if (siteFooter.length > 500) return fail(c, '页脚最长 500 字')
-  await repo.saveSettings({ siteName, siteDescription, siteNotice, siteFooter })
+  if (dmMinCredit < 0 || dmMinCredit > 1000) return fail(c, '私信信用分门槛需为 0-1000')
+  if (creditMax < 0 || creditMax > 100000) return fail(c, '信用分上限需为 0-100000')
+  if (creditRecoverMinutes < 0 || creditRecoverMinutes > 10080) {
+    return fail(c, '信用分恢复间隔需为 0-10080 分钟')
+  }
+  await repo.saveSettings({
+    siteName,
+    siteDescription,
+    siteNotice,
+    siteFooter,
+    dmMinCredit,
+    creditMax,
+    creditRecoverMinutes,
+  })
   return c.json(await repo.getSettings())
 })
 
@@ -1209,11 +1697,11 @@ api.post('/admin/reports/:id/resolve', async (c) => {
   // Resolving carries the credit consequence; `ban` is an optional follow-up.
   const authorId = await repo.resolveReport(report, action === 'accept', admin.id)
   if (action === 'accept' && b.ban === true && authorId && authorId !== admin.id) {
-    await repo.setUserBan(authorId, {
-      banned: true,
-      reason: str(b.banReason).trim().slice(0, 200) || '举报成立',
-      until: normalizeUntil(b.bannedUntil),
-    })
+    const reason = str(b.banReason).trim().slice(0, 200) || '举报成立'
+    const until = normalizeUntil(b.bannedUntil)
+    const wasBanned = (await repo.findUserById(authorId))?.banned ?? false
+    await repo.setUserBan(authorId, { banned: true, reason, until })
+    if (!wasBanned) await notifyBan(authorId, admin, reason, until)
   }
   return c.json({ ok: true })
 })

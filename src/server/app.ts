@@ -11,12 +11,15 @@ import { Hono } from 'hono'
 import { serveStatic } from 'hono/bun'
 import { join } from 'node:path'
 import { emailGate, session } from './auth'
+import { feedRoutes } from './feed'
 import { api } from './routes'
 import * as storage from './storage'
 import type { AppEnv } from './auth'
 
-const distDir = join(import.meta.dir, '..', '..', 'dist')
-const distIndex = join(distDir, 'index.html')
+// The whole served tree: built SPA (index.html + assets/) and runtime uploads
+// (assets/uploads/, reached through /uploads/<key> below).
+const publicDir = join(import.meta.dir, '..', '..', 'public')
+const publicIndex = join(publicDir, 'index.html')
 
 export const app = new Hono<AppEnv>()
 
@@ -25,6 +28,11 @@ app.use('/api/*', session)
 // email binding cannot be bypassed by calling the API directly.
 app.use('/api/*', emailGate)
 app.route('/api', api)
+
+// Feeds live at the site root, where readers and <link rel="alternate"> point.
+// They are public, so they are mounted before the SPA fallback but after the
+// session middleware that covers only /api.
+app.route('/', feedRoutes)
 
 // Uploaded objects. The public path is backend-independent, which is what lets
 // a post body written against local disk keep working after moving to S3.
@@ -60,8 +68,8 @@ if (storage.driver === 's3') {
 
 // Built frontend present? Serve it. Absent (fresh clone, dev against Vite),
 // skip — `bun run dev` puts the UI on :5173 instead.
-if (await Bun.file(distIndex).exists()) {
-  app.use('/*', serveStatic({ root: distDir }))
+if (await Bun.file(publicIndex).exists()) {
+  app.use('/*', serveStatic({ root: publicDir }))
 
   app.get('*', async (c, next) => {
     // Never let the SPA fallback answer for the API, or an unknown endpoint
@@ -70,7 +78,10 @@ if (await Bun.file(distIndex).exists()) {
     // Anything with a file extension is a real asset request: a 404 is the
     // honest answer, and returning HTML there breaks stale asset URLs.
     if (/\.[a-z0-9]+$/i.test(c.req.path)) return await next()
-    return serveStatic({ path: distIndex })(c, next)
+    // serveStatic joins its root and path, so the file must be expressed as
+    // root + relative name — an absolute `path` is silently joined into a
+    // nonexistent relative one and every deep link 404s.
+    return serveStatic({ root: publicDir, path: 'index.html' })(c, next)
   })
 }
 

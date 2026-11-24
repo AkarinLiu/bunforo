@@ -2,14 +2,18 @@
  * Server entry — `bun run index.ts`, or `bun run dev` for API + Vite together.
  */
 import { databaseUrl, dialect, ensureSchema } from './src/db/index'
-import { ensureReportReasons, ensureSystemUser } from './src/db/repo'
+import { ensureReportReasons, ensureSystemUser, syncAdminGroup } from './src/db/repo'
 import { app } from './src/server/app'
+import { runUploadCleanup, UPLOAD_SWEEP_INTERVAL_MS } from './src/server/cleanup'
+import { CREDIT_RECOVERY_CHECK_MS, creditRecoveryTick } from './src/server/credit'
 import { mailConfigured } from './src/server/mailer'
 import { driver as storageDriver, maxUploadBytes, maxVideoBytes, uploadDir } from './src/server/storage'
 
 await ensureSchema()
 await ensureSystemUser()
 await ensureReportReasons()
+// Seeds the built-in 管理员 group and attaches any admin that has none.
+await syncAdminGroup()
 
 // Forced binding is a no-op without mail; say so loudly rather than silently
 // ignoring the flag (which would be indistinguishable from a typo).
@@ -39,3 +43,24 @@ console.log(
     : `[bunforo] uploads → ${uploadDir} (local)`,
 )
 console.log(`[bunforo] listening on ${server.url}`)
+
+// Reclaim abandoned uploads: a composer that never submitted leaves a file
+// behind. One pass on boot, then hourly; failures are logged and never fatal.
+async function sweepUploads(): Promise<void> {
+  try {
+    const { deleted } = await runUploadCleanup()
+    if (deleted) console.log(`[bunforo] removed ${deleted} unused upload(s)`)
+  } catch (err) {
+    console.error('[bunforo] upload cleanup failed:', err)
+  }
+}
+void sweepUploads()
+setInterval(() => void sweepUploads(), UPLOAD_SWEEP_INTERVAL_MS)
+
+// Credit recovery is configured in the admin settings, so the check runs on a
+// fixed minute and reads the interval each time; the first pass only starts the
+// clock.
+void creditRecoveryTick().catch((err) => console.error('[bunforo] credit recovery failed:', err))
+setInterval(() => {
+  void creditRecoveryTick().catch((err) => console.error('[bunforo] credit recovery failed:', err))
+}, CREDIT_RECOVERY_CHECK_MS)

@@ -7,8 +7,8 @@ and one codebase that runs on SQLite, PostgreSQL or MySQL.
 
 - Install: `bun install`
 - Dev (API + Vite together): `bun run dev` → UI on :5173, API on :3000, `/api` proxied
-- API only: `bun run start` → :3000, serves `dist/` too if it has been built
-- Build frontend: `bun run build` → `dist/`
+- API only: `bun run start` → :3000, serves `public/` too if it has been built
+- Build frontend: `bun run build` → `public/` (index.html + assets/)
 - Migrate uploads to S3: `bun run migrate:s3`
 - Import GitHub Discussions: `bun run import:github` (needs `GITHUB_TOKEN` + `GITHUB_REPO`)
 - Typecheck: `bun run typecheck` (`tsc --noEmit`)
@@ -120,6 +120,21 @@ hard override even when credentials are present in the environment, so the S3
 client is only constructed for the s3 driver. Branching on "are credentials set"
 makes the override a lie.
 
+**`serveStatic` joins `root` and `path` — never pass an absolute file
+path.** The SPA fallback serves `index.html` as `{ root: publicDir, path:
+'index.html' }`. Passing `{ path: publicIndex }` joins `./` with an absolute
+path, which silently becomes a relative one: every deep link (`/t/1`, `/feeds`)
+404s while `/` still works, because `/` is served by the earlier static
+middleware.
+
+**The build output and runtime uploads share `public/`.** `vite build` writes
+`public/index.html` + `public/assets/index-*`, and uploads default to
+`public/assets/uploads` — Hono serves the whole tree as the web root. That is
+why `build.emptyOutDir` is `false` (Vite would delete the uploads) and why
+`scripts/clean-public.ts` clears the previous bundles before each build, leaving
+`assets/uploads` alone. `publicDir: false` keeps Vite from copying the tree into
+itself.
+
 **`/uploads/*` is not under `/api`.** Anything that routes `/api` must route
 `/uploads` too — that is why `vite.config.ts` has a second proxy entry, and why
 the SPA fallback had to learn to keep its hands off both.
@@ -132,7 +147,8 @@ when the target is absent, merging missing keys when it already exists, so old
 `/uploads/<key>` URLs do not 404. A failed move/merge aborts startup. Stored
 bodies and avatars still hold `/uploads/<key>`, served by Hono from `uploadDir`;
 never write the filesystem path or an S3 URL into the database. `vite.config.ts`
-sets `publicDir: false` so a build cannot copy runtime uploads into `dist/`.
+sets `publicDir: false` so a build cannot copy runtime uploads into the build
+output (which is `public/` itself).
 
 **Video is in the upload allowlist now; SVG still is not.** `filetype.ts` accepts
 MP4/MOV brands inside ISO-BMFF and WebM (EBML DocType `webm`, not Matroska).
@@ -185,6 +201,142 @@ in `routes.ts` only encodes `{state, next}`. `next` is same-site-only (no `//`,
 no `/api`). The import CLI refuses to run when `countUsers() === 0`: creating
 placeholder users before `/setup` would make the site permanently admin-less.
 
+**Live updates are SSE on one process-local hub, with a 5s heartbeat.**
+`GET /api/events` (`src/server/events.ts` + `routes.ts`) streams `notification`,
+`dm:message`, `thread:post` and `thread:created`. Public `thread:*` events go to
+every open stream; the other two are addressed to one user. Bun closes a
+connection idle for 10s, so the route pings every 5s — a 20s heartbeat silently
+dropped every quiet tab. The hub is a `Map` in memory: running more than one
+instance would need Redis pub/sub, and the `publish*` helpers are the only place
+that changes. EventSource reconnects by itself and does not replay missed events,
+so every page still loads its data once on mount.
+
+**Colours are tokens only, and light mode is a media query.**
+`src/web/style.css` defines the dark palette on `:root` and re-points the same
+variables inside `@media (prefers-color-scheme: light)` — there is no JS toggle
+and no `data-theme` attribute. Never hard-code a hex in a rule: it will be
+wrong in one of the two themes. Accent tints use
+`rgb(var(--accent-rgb) / N%)`, and danger/ok chrome uses the
+`--danger-*`/`--ok-*` tokens. `color-scheme` follows the media query so native
+controls and scrollbars match.
+
+**Feeds live at the site root, not under `/api`.** `src/server/feed.ts`
+serves `/feed.xml` and `/c/:id/feed.xml`, mounted in `app.ts` before the SPA
+fallback. A parent board's feed uses `listThreadsInCategoryTree` so it carries
+its direct sub-boards' threads; the `/c/:id` page itself stays direct-only.
+`/feeds` is the in-app directory of every feed (sidebar → RSS 订阅).
+They also need their own `vite.config.ts` proxy entries: without them Vite answers
+`/feed.xml` with `index.html` and the router redirects the click to `/`, so the
+feed looks broken only in dev. The board rule is a regex so `/c/:id` itself
+stays an SPA route. Every user-supplied string goes through `escapeXml()` in
+`src/server/rss.ts` (title, author, board name, URLs); the body is flattened
+with `plainText()`, never rendered HTML. Absolute links use `PUBLIC_BASE_URL`
+when set (the same reverse-proxy rule as the OAuth callback) and otherwise the
+request origin, including `X-Forwarded-*`. Responses are cached for 5 minutes.
+
+**Notifications are rows with pre-rendered text.** `notifications` stores the
+recipient, the actor, the target (`thread_id` / `post_id` / `dm_thread_id`), a
+Chinese headline in `body` and a flattened one-line `excerpt` of the reply or
+message — the client prints both verbatim and never formats a notification in
+Vue. `excerptOf()` strips Markdown (images become a placeholder) because the
+preview is plain text, not `v-html`.
+Reply, @mention, like and DM write them in `routes.ts`; a mention is skipped when
+that user already gets a reply notice for the same post. A DM keeps at most one
+unread bell row per conversation (`hasUnreadDmNotification`), and opening the
+conversation marks it read. The target columns are nullable because deleting a
+thread, post or DM cascades its notifications away.
+
+**The 管理员 group is seeded, and membership is the admin role.** `ensureAdminGroup()`
+creates a `user_groups` row with `builtin = true` (or adopts an existing group of
+that name). There is no separate "make admin" action: assigning the group in
+`PATCH /admin/users/:id` also sets `role = 'admin'`, and assigning any other
+group (or none) sets `role = 'user'`. An admin cannot drop their own membership
+(self-lockout guard). `syncAdminGroup()` runs on boot to enforce the same
+invariant for rows that predate it: admins are moved into the group (even out of
+a custom badge — one group per user), then group members are made admin. Its
+name and deletion are refused in `/admin/groups`; colour and position stay
+editable.
+
+**Credit recovers on a timer, driven by a process-local clock.**
+`settings.credit_recover_minutes` (admin → 站点, 0 = off) makes
+`src/server/credit.ts` award +1 per interval to every real account below the
+ceiling. The scheduler in `index.ts` checks once a minute and reads the interval
+each time, so a change applies live; the first tick after boot only starts the
+clock, and a restart resets it (no per-user timestamp column — acceptable for a
+reputation score). `creditRecoveryTick` advances by whole intervals so the
+cadence does not drift, and `recoverCredit` clamps at `credit_max`. The cron
+never runs inside tests; the tick takes an injectable `now`.
+
+**Credit has a configurable ceiling.** `settings.credit_max` (admin → 站点,
+0 = unlimited, default 1000) is applied inside `applyCredit`: only increases are
+clamped, and a score already above a newly lowered cap is grandfathered —
+deductions still work. `startingCredit()` also clamps a new account's initial
+score, so a cap below `CREDIT_START` is honoured for registrations and GitHub
+placeholders. `applyCredit` is the only reward path; a manual `creditDelta` in
+the admin API and accepted-report penalties both go through it.
+
+**Private messages can require a minimum credit score.** `settings.dm_min_credit`
+(admin → 站点, 0 = off) is served publicly through `/api/meta` so the client can
+hide the composer. The gate lives in both DM write routes
+(`POST /dm/threads` and `POST /dm/threads/:id/messages`); reading is never
+blocked. Admins are exempt, and so are banned accounts — their only remaining
+channel is the appeal DM to staff, and a report penalty must not cut it off.
+The threshold is read from `getSettings()` per request, so a change applies
+immediately without a restart.
+
+**Blacklists are directional and gate mentions + DMs only.** `user_blocks`
+stores `(blocker_id, blocked_id)`; `isBlocked(blocker, sender)` means the sender
+may not reach the blocker. `notifyMentions` silently skips a blocked mention
+(the post still publishes), and both DM write routes refuse when any other
+participant has blocked the sender. The blocker may still DM the blocked user —
+the relation is one-way, not a mutual ban. Scope is deliberately narrow: replies
+and likes still notify, and public content stays readable.
+
+**Admin warnings and bans are notices, not just flags.** `POST /admin/users/:id/warn`
+records a row in `user_warnings` (surfaced as `warningCount` on `AdminUser`) and
+writes a `warning` notification. Every switch into the banned state — the admin
+toggle, the report-resolution ban checkbox and a credit drop below the
+auto-ban threshold — calls `notifyBan` exactly once (`target.banned` is the
+"was already banned" check); un-banning and re-saving a ban stay silent.
+`warning`/`ban` sit in `NOTIFICATION_PREF` with `null`, so preference mutes can
+never hide policy messages. Warning self/system targets is refused.
+
+**A banned account is read-only except for DMs to administrators.** `session`
+keeps it signed in and `toSelfUser` carries its own `banned`/`banReason`/
+`bannedUntil` (never in `PublicUser`). `POST /threads`, `POST /threads/:id/posts`
+return `BANNED_WRITE`; creating or replying in a DM requires every other
+participant to be an admin (`BANNED_DM`). `adminOnly` and `canManage` also
+ignore the admin half of a banned admin, so a ban cannot be moderated around.
+The client hides the composer/new-thread entries and shows a banner from
+`auth.user`; the server checks are the real gate.
+
+**Ban details are exposed only by `GET /users/:username`.** That response carries
+an extra `ban: { reason, until } | null` (null for a permanent ban's `until`); it
+is computed from `banned`/`ban_reason`/`banned_until` and `toPublicUser` still
+omits them, so posts, notifications and author fields never leak a ban. The
+endpoint also calls `clearExpiredBan` on the target, because a public read may be
+the first request after a temporary ban expired. `PublicUser` must stay free of
+these columns; widen the profile response instead.
+
+**User settings are a separate table with lazy defaults.** `user_settings` has
+one row per account and only appears after the first save; `getUserSettings`
+returns `DEFAULT_USER_SETTINGS` otherwise, so every account starts with all four
+notification switches on. `notifyUser` consults `NOTIFICATION_PREF` and skips the
+row entirely when a category is muted — the suppression happens before the
+insert, so nothing reaches the recipient's open stream either. Password change
+verifies the current hash, calls `resetUserPassword` (which bumps the session
+version) and then re-issues this tab's cookie; without that the person who just
+proved the old password would log themselves out.
+
+**Orphaned uploads are swept hourly after a 24h grace period.**
+`src/server/cleanup.ts` lists storage (`listObjects`, both drivers), keeps only
+`<uuid>.<ext>` keys, and deletes those older than `UPLOAD_GRACE_MS` whose key
+appears in no content column. `referencedUploadKeys` covers posts, drafts (an
+unpublished draft must keep its images), DM messages, avatars and the two
+site-text fields — widen it when a new column can embed `/uploads/<key>`. A file
+whose backend reports no mtime is never deleted. The sweep is scheduled from
+`index.ts`; it assumes one process, and deletes are idempotent.
+
 **Tests must stay off the real database and upload directory.** `bunfig.toml`
 preloads `test/setup.ts`, which pins `DATABASE_URL=:memory:`,
 `STORAGE_DRIVER=local` and a temp `UPLOAD_DIR` *before* any module reads its
@@ -233,3 +385,6 @@ type errors start costing more than the dependency.
 - `bun.lock` is committed — run `bun install` after dependency changes
 - Deleting a thread's opening post is rejected (`OPENING_POST`); delete the
   thread instead. Post/reply cascades are enforced by the DDL, not by app code.
+- An uploaded file's public URL is a site-relative `/uploads/<key>`, so never put
+  one in an `<input type="url">` — the browser rejects a relative path and blocks
+  the whole form submit (this is what broke avatar editing). Use `type="text"`.

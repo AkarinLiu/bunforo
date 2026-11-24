@@ -73,6 +73,15 @@ const time = (iso: string) => iso.replace('T', ' ').slice(0, 16)
         <p class="muted" style="margin: 6px 0 0">{{ category?.description || '暂无简介' }}</p>
       </div>
       <span class="spacer"></span>
+      <a
+        :href="`/c/${id}/feed.xml`"
+        class="btn btn-sm btn-ghost"
+        target="_blank"
+        rel="alternate"
+        type="application/rss+xml"
+      >
+        RSS
+      </a>
       <router-link
         v-if="auth.user"
         :to="`/new?category=${category?.id ?? ''}`"

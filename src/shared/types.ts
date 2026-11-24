@@ -71,6 +71,8 @@ export interface UserGroupRow {
   /** badge colour, `#rrggbb` */
   color: string
   position: number
+  /** seeded admin group: cannot be renamed or deleted */
+  builtin: boolean
   /** filled by list queries only */
   memberCount?: number
 }
@@ -102,7 +104,31 @@ export interface SettingsRow {
   siteNotice: string
   /** footer line, shown on every page; hidden when '' */
   siteFooter: string
+  /** minimum credit to start or send a private message; 0 = no limit */
+  dmMinCredit: number
+  /** ceiling for credit awards; 0 = no limit */
+  creditMax: number
+  /** automatic +1 credit per this many minutes; 0 = disabled */
+  creditRecoverMinutes: number
 }
+
+/**
+ * Per-user preferences. Site-wide texts live in SettingsRow; these are the
+ * switches a single account owns, currently all about notifications.
+ */
+export interface UserSettings {
+  /** someone replied to my thread or to my post */
+  notifyReply: boolean
+  /** someone @mentioned me */
+  notifyMention: boolean
+  /** someone liked my post */
+  notifyLike: boolean
+  /** a private message arrived */
+  notifyDm: boolean
+}
+
+/** A user this account has blocked (shown in settings). */
+export type BlockedUser = Pick<UserRow, 'id' | 'username' | 'displayName' | 'avatarUrl'>
 
 /** A preset reason offered in the report dialog; admins manage the list. */
 export interface ReportReasonRow {
@@ -191,15 +217,20 @@ export const toPublicUser = (u: UserRow): PublicUser => ({
 })
 
 /**
- * The session's own user: adds the email, which must never leave the account —
- * `PublicUser` (and every `/users/:username` response) deliberately omits it.
+ * The session's own user: adds the email and its own ban state, neither of
+ * which may leave the account — `PublicUser` (and every author field) omits
+ * them. A banned account still signs in so it can browse and appeal by DM.
  */
-export type SelfUser = PublicUser & Pick<UserRow, 'email' | 'emailVerified'>
+export type SelfUser = PublicUser &
+  Pick<UserRow, 'email' | 'emailVerified' | 'banned' | 'banReason' | 'bannedUntil'>
 
 export const toSelfUser = (u: UserRow): SelfUser => ({
   ...toPublicUser(u),
   email: u.email,
   emailVerified: u.emailVerified,
+  banned: u.banned,
+  banReason: u.banReason,
+  bannedUntil: u.bannedUntil,
 })
 
 /** `verify` confirms a bound email; `reset` authorizes a password change. */
@@ -220,6 +251,8 @@ export interface AdminUser extends PublicUser {
   /** omitted from `PublicUser` on purpose; the admin table needs it */
   banned: boolean
   postCount: number
+  /** total warnings ever issued to this account */
+  warningCount: number
   banReason: string
   bannedUntil: string | null
 }
@@ -278,4 +311,40 @@ export interface DmThreadRow {
   /** messages from others since the viewer last opened it */
   unreadCount?: number
   messageCount?: number
+}
+
+/** What produced a notification. A system notice has no actor and no target row. */
+export type NotificationType =
+  | 'reply'
+  | 'mention'
+  | 'like'
+  | 'dm'
+  | 'warning'
+  | 'ban'
+  | 'system'
+
+/**
+ * One inbox entry. The target columns are mutually exclusive in practice
+ * (thread/post for public content, dm_thread for a private message) and are
+ * nullable so deleting the target cascades the row away instead of leaving a
+ * dangling link.
+ */
+export interface NotificationRow {
+  id: number
+  /** recipient */
+  userId: number
+  type: NotificationType
+  /** who caused it; null for system notices or a deleted account */
+  actorId: number | null
+  threadId: number | null
+  postId: number | null
+  dmThreadId: number | null
+  /** pre-rendered, human-readable text — the client never formats it */
+  body: string
+  /** plain-text preview of the reply/message that caused it; '' for system */
+  excerpt: string
+  readAt: string | null
+  createdAt: string
+  /** filled by list queries only */
+  actor?: Pick<UserRow, 'id' | 'username' | 'displayName' | 'avatarUrl'>
 }

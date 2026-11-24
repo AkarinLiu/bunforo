@@ -15,6 +15,7 @@ import type {
   ReportRow,
   SelfUser,
   SettingsRow,
+  NotificationRow,
   TagRow,
   ThreadRow,
   UserGroupRow,
@@ -113,6 +114,8 @@ export interface MetaResponse {
   requireEmail: boolean
   /** a GitHub OAuth app is configured, so the login button will work */
   githubOAuth: boolean
+  /** minimum credit score to use private messages; 0 = no limit */
+  dmMinCredit: number
 }
 export interface EmailBindResponse {
   email: string
@@ -129,10 +132,18 @@ export interface ThreadDetailResponse {
   thread: ThreadRow
   posts: PostRow[]
 }
+export interface ProfileBan {
+  /** admin-supplied reason; '' when none was given */
+  reason: string
+  /** ISO timestamp, or null for a permanent ban */
+  until: string | null
+}
 export interface ProfileResponse {
   user: PublicUser
   threadCount: number
   postCount: number
+  /** active ban only; null when the account is not restricted */
+  ban: ProfileBan | null
 }
 export interface LikeResponse {
   liked: boolean
@@ -151,6 +162,10 @@ export interface UploadResponse {
 export interface DmThreadDetailResponse {
   thread: DmThreadRow
   messages: DmMessageRow[]
+}
+export interface NotificationsResponse {
+  items: NotificationRow[]
+  unread: number
 }
 export type CategoriesResponse = CategoryRow[]
 export type ThreadsResponse = ThreadRow[]

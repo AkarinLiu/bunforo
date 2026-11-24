@@ -12,7 +12,7 @@
  * Works with AWS S3, Cloudflare R2, MinIO, Backblaze B2 and Spaces. A custom
  * endpoint is addressed path-style, which MinIO requires and R2 accepts.
  */
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir, stat, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { DEFAULT_UPLOAD_DIR, migrateLegacyUploadDir } from './legacy-uploads'
 
@@ -124,14 +124,16 @@ export async function exists(key: string): Promise<boolean> {
   return s3.exists(key)
 }
 
-/**
- * Every key in the bucket, for the manual migration. Bun's list is paginated;
- * the bucket is expected to be dedicated to this forum, matching the old
- * root-level key layout (`<uuid>.<ext>`).
- */
-export async function listKeys(): Promise<Set<string>> {
-  const keys = new Set<string>()
-  if (!s3) return keys
+export interface StoredObject {
+  key: string
+  /** epoch ms; 0 when the backend reported none (never auto-deleted) */
+  lastModified: number
+}
+
+/** Bucket contents, with timestamps. Bun's list is paginated at 1000 keys. */
+async function listS3Objects(): Promise<StoredObject[]> {
+  const objects: StoredObject[] = []
+  if (!s3) return objects
   let startAfter: string | undefined
   for (;;) {
     const page: any = await (s3 as any).list({
@@ -139,9 +141,58 @@ export async function listKeys(): Promise<Set<string>> {
       ...(startAfter ? { startAfter } : {}),
     })
     const contents: any[] = page?.contents ?? []
-    for (const item of contents) if (item?.key) keys.add(String(item.key))
+    for (const item of contents) {
+      if (!item?.key) continue
+      const parsed = item.lastModified ? Date.parse(String(item.lastModified)) : NaN
+      objects.push({ key: String(item.key), lastModified: Number.isFinite(parsed) ? parsed : 0 })
+    }
     if (!page?.isTruncated || contents.length === 0) break
     startAfter = contents[contents.length - 1]?.key
   }
-  return keys
+  return objects
+}
+
+/**
+ * Every key in the bucket, for the manual migration. The bucket is expected to
+ * be dedicated to this forum, matching the old root-level key layout.
+ */
+export async function listKeys(): Promise<Set<string>> {
+  if (!s3) return new Set()
+  return new Set((await listS3Objects()).map((object) => object.key))
+}
+
+/**
+ * Every stored object with its modification time, on either backend. The
+ * upload sweeper needs the timestamp to grant new files a grace period.
+ */
+export async function listObjects(): Promise<StoredObject[]> {
+  if (s3) return listS3Objects()
+
+  let entries
+  try {
+    entries = await readdir(uploadDir, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const objects: StoredObject[] = []
+  for (const entry of entries) {
+    if (!entry.isFile()) continue
+    try {
+      const info = await stat(join(uploadDir, entry.name))
+      objects.push({ key: entry.name, lastModified: info.mtimeMs })
+    } catch {
+      // Vanished between readdir and stat — nothing to do.
+    }
+  }
+  return objects
+}
+
+/** Deletes one object. The key is validated so it can never escape the root. */
+export async function remove(key: string): Promise<void> {
+  if (!isValidKey(key)) throw new Error('invalid storage key')
+  if (!s3) {
+    await unlink(join(uploadDir, key))
+    return
+  }
+  await s3.delete(key)
 }

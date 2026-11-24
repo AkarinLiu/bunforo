@@ -36,6 +36,7 @@ export const userGroups = pgTable('user_groups', {
   name: text('name').notNull().unique(),
   color: text('color').notNull(),
   position: integer('position').notNull(),
+  builtin: boolean('builtin').notNull().default(false),
 })
 
 export const categories = pgTable('categories', {
@@ -121,6 +122,42 @@ export const dmMessages = pgTable('dm_messages', {
   createdAt: text('created_at').notNull(),
 })
 
+export const userBlocks = pgTable('user_blocks', {
+  blockerId: integer('blocker_id').notNull(),
+  blockedId: integer('blocked_id').notNull(),
+  createdAt: text('created_at').notNull(),
+})
+
+export const userWarnings = pgTable('user_warnings', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id').notNull(),
+  adminId: integer('admin_id'),
+  reason: text('reason').notNull(),
+  createdAt: text('created_at').notNull(),
+})
+
+export const notifications = pgTable('notifications', {
+  id: serial('id').primaryKey(),
+  userId: integer('user_id').notNull(),
+  type: text('type').notNull(),
+  actorId: integer('actor_id'),
+  threadId: integer('thread_id'),
+  postId: integer('post_id'),
+  dmThreadId: integer('dm_thread_id'),
+  body: text('body').notNull(),
+  excerpt: text('excerpt').notNull(),
+  readAt: text('read_at'),
+  createdAt: text('created_at').notNull(),
+})
+
+export const userSettings = pgTable('user_settings', {
+  userId: integer('user_id').primaryKey(),
+  notifyReply: boolean('notify_reply').notNull(),
+  notifyMention: boolean('notify_mention').notNull(),
+  notifyLike: boolean('notify_like').notNull(),
+  notifyDm: boolean('notify_dm').notNull(),
+})
+
 // Single row (id = 1); the DDL pins that with a CHECK constraint.
 export const settings = pgTable('settings', {
   id: integer('id').primaryKey(),
@@ -128,6 +165,9 @@ export const settings = pgTable('settings', {
   siteDescription: text('site_description').notNull(),
   siteNotice: text('site_notice').notNull(),
   siteFooter: text('site_footer').notNull(),
+  dmMinCredit: integer('dm_min_credit').notNull().default(0),
+  creditMax: integer('credit_max').notNull().default(1000),
+  creditRecoverMinutes: integer('credit_recover_minutes').notNull().default(0),
 })
 
 export const reportReasons = pgTable('report_reasons', {

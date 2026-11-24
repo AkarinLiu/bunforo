@@ -1,15 +1,23 @@
 /*
  * BunForo design system — a single global stylesheet.
  *
- * Visual target is bun.com: near-black canvas, hairline borders, warm
- * yellow→orange accent, terminal-flavoured code blocks. Reka UI ships no
- * styles, so every component state below is styled from its data-* attributes.
+ * Visual target is bun.com: a near-black canvas in dark mode, a paper-white one
+ * in light mode, hairline borders, a warm yellow→orange accent and
+ * terminal-flavoured code blocks. Reka UI ships no styles, so every component
+ * state below is styled from its data-* attributes.
  *
  * Tokens first, then primitives (buttons/inputs), then composites (cards,
  * threads, posts) and finally the Reka UI component states.
  */
 
+/*
+ * Two themes, one token set. The dark palette is the default; when the OS asks
+ * for light (prefers-color-scheme: light) the same variables are re-pointed and
+ * every component follows without a class or a frame of flash.
+ */
 :root {
+  color-scheme: dark;
+
   --bg: #000000;
   --surface: #0c0c0e;
   --surface-2: #141417;
@@ -18,16 +26,29 @@
   --border-strong: #35353d;
 
   --text: #f2f2f3;
+  --text-body: #e4e4e7;
   --text-muted: #92929c;
   --text-faint: #63636d;
 
   --accent: #f5b32c;
   --accent-bright: #ffd166;
   --accent-ink: #1a1204;
+  --accent-rgb: 245 179 44;
   --orange: #ff7a1a;
+  --orange-rgb: 255 122 26;
 
   --danger: #ff6159;
+  --danger-border: #4a2422;
+  --danger-bg: #170d0d;
+  --danger-bg-hover: #1e1010;
+  --danger-ink: #f0c7c4;
   --ok: #4ade80;
+  --ok-border: #1e3a2a;
+  --ok-bg: #0b1610;
+
+  --header-bg: rgb(0 0 0 / 80%);
+  --avatar-from: #2a2a31;
+  --avatar-to: #17171b;
 
   --radius: 12px;
   --radius-sm: 8px;
@@ -38,6 +59,52 @@
     Consolas, monospace;
 
   --shadow: 0 8px 32px rgb(0 0 0 / 55%);
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --bg: #f7f7f8;
+    --surface: #ffffff;
+    --surface-2: #f2f2f5;
+    --surface-3: #e9e9ef;
+    --border: #e3e3e9;
+    --border-strong: #cdcdd6;
+
+    --text: #17171c;
+    --text-body: #26262d;
+    --text-muted: #5b5b66;
+    --text-faint: #74747f;
+
+    --accent: #b45309;
+    --accent-bright: #92400e;
+    --accent-ink: #ffffff;
+    --accent-rgb: 180 83 9;
+    --orange: #c2410c;
+    --orange-rgb: 194 65 12;
+
+    --danger: #b42318;
+    --danger-border: #f5c2bd;
+    --danger-bg: #fef3f2;
+    --danger-bg-hover: #fde8e6;
+    --danger-ink: #912018;
+    --ok: #067647;
+    --ok-border: #b7e4c7;
+    --ok-bg: #ecfdf3;
+
+    --header-bg: rgb(255 255 255 / 85%);
+    --avatar-from: #e9e9ef;
+    --avatar-to: #d9d9e2;
+
+    --shadow: 0 8px 32px rgb(16 24 40 / 12%);
+  }
+
+  /* Group badges carry an admin-chosen colour; darken it slightly so a warm
+     brand colour (the default is #f5b32c) stays readable on white. */
+  .group-badge {
+    filter: brightness(0.78);
+  }
 }
 
 *,
@@ -115,7 +182,7 @@ code,
   top: 0;
   z-index: 20;
   border-bottom: 1px solid var(--border);
-  background: rgb(0 0 0 / 80%);
+  background: var(--header-bg);
   backdrop-filter: blur(12px);
 }
 
@@ -167,7 +234,7 @@ code,
 
 .header-search:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(245 179 44 / 15%);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 15%);
 }
 
 .header-search input {
@@ -210,7 +277,209 @@ code,
   margin-left: auto;
 }
 
+/* Live badges. The bell sits on an icon button, so it needs its own anchor. */
+.bell-btn {
+  position: relative;
+}
+
+.bell-badge {
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+}
+
+.side-badge {
+  flex: none;
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+
+/* Notification dropdown (header bell). */
+.notif-menu {
+  width: min(88vw, 320px);
+}
+
+.notif-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px 5px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.notif-clear {
+  border: none;
+  background: transparent;
+  color: var(--accent-bright);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.notif-clear:hover {
+  text-decoration: underline;
+}
+
+.notif-empty {
+  margin: 0;
+  padding: 14px 10px;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+.notif-item {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.notif-item.unread {
+  background: rgb(var(--accent-rgb) / 6%);
+}
+
+.notif-text {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.notif-body {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.notif-time {
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+/* Content preview: flattened to plain text on the server, clamped here so a
+   long reply cannot stretch the dropdown or the inbox row. */
+.notif-excerpt,
+.notif-row-excerpt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.notif-excerpt {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  font-size: 12.5px;
+}
+
+.notif-row-excerpt {
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  font-size: 13px;
+}
+
+/* Inbox page. */
+.notif-title {
+  font-size: 24px;
+}
+
+.notif-list {
+  display: grid;
+  overflow: hidden;
+}
+
+.notif-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 18px;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notif-row:last-child {
+  border-bottom: none;
+}
+
+.notif-row:hover {
+  background: var(--surface-2);
+}
+
+.notif-row.unread {
+  background: rgb(var(--accent-rgb) / 5%);
+}
+
+.notif-row-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.notif-row-body {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.notif-row-time {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.notif-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 /* -------------------------------------------------------------- shell */
+
+/* Restricted-account strip under the header; visible on every page. */
+.ban-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  font-size: 13.5px;
+}
+
+.ban-notice strong {
+  color: var(--danger);
+}
+
+.ban-notice span {
+  color: var(--danger-ink);
+}
 
 .app-body {
   display: flex;
@@ -221,10 +490,10 @@ code,
   position: sticky;
   top: 60px;
   flex: none;
-  width: 232px;
+  width: 248px;
   height: calc(100vh - 60px);
   overflow-y: auto;
-  padding: 18px 14px 28px;
+  padding: 16px 12px 28px;
   border-right: 1px solid var(--border);
   transition: width 0.15s, padding 0.15s;
 }
@@ -237,6 +506,38 @@ code,
   overflow: hidden;
 }
 
+/* Grouped panels: 导航 / 分类 / 标签. Each block is its own card so the
+   three sections read as separate areas, matching the reference layout. */
+.side-block {
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.side-block + .side-block {
+  margin-top: 12px;
+}
+
+.side-cta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 14px;
+  font-weight: 650;
+  transition: background 0.12s;
+}
+
+.side-cta:hover {
+  background: var(--accent-bright);
+  color: var(--accent-ink);
+}
+
 .side-nav {
   display: grid;
   gap: 2px;
@@ -244,13 +545,48 @@ code,
 }
 
 .side-heading {
-  margin: 18px 0 6px;
-  padding: 0 10px;
+  margin: 2px 0 6px;
+  padding: 0 8px;
   color: var(--text-faint);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
+}
+
+/* "更多" folds the secondary entries away on narrow screens. */
+.side-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.side-more:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.side-more svg {
+  transition: transform 0.15s;
+}
+
+.side-more[aria-expanded='true'] svg {
+  transform: rotate(180deg);
+}
+
+.side-more-items .side-link {
+  padding-left: 22px;
+  font-size: 13.5px;
 }
 
 .side-link {
@@ -269,27 +605,16 @@ code,
   color: var(--text);
 }
 
-.side-link.router-link-active {
+.side-link.router-link-active,
+.side-link.is-active {
   background: var(--surface-2);
   color: var(--text);
   font-weight: 600;
 }
 
 .side-link-child {
-  padding-left: 36px;
+  padding-left: 22px;
   font-size: 13.5px;
-}
-
-.side-ico {
-  flex: none;
-  width: 16px;
-  color: var(--text-faint);
-  text-align: center;
-  font-size: 12px;
-}
-
-.side-link.router-link-active .side-ico {
-  color: var(--accent);
 }
 
 .side-name {
@@ -310,6 +635,180 @@ code,
   padding: 8px 10px;
   color: var(--text-faint);
   font-size: 13px;
+}
+
+/* Feed link under the sidebar panels, not inside one — it is site chrome. */
+.side-rss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin-top: 12px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.side-rss:hover {
+  background: var(--surface-2);
+  color: var(--accent-bright);
+}
+
+/* --------------------------------------------------------------- settings */
+
+.settings-head {
+  padding: 6px 0 22px;
+}
+
+.settings-head h1 {
+  font-size: 28px;
+}
+
+.settings-head p {
+  margin: 8px 0 0;
+  font-size: 14px;
+}
+
+.settings-section {
+  margin-bottom: 16px;
+}
+
+.settings-section h2 {
+  margin-bottom: 6px;
+  font-size: 18px;
+}
+
+.settings-hint {
+  margin: 0 0 16px;
+  font-size: 13px;
+}
+
+.settings-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.settings-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.settings-switch:last-of-type {
+  border-bottom: none;
+}
+
+.settings-switch-title {
+  display: block;
+  font-size: 14px;
+}
+
+.settings-switch-desc {
+  display: block;
+  margin-top: 2px;
+  font-size: 12.5px;
+}
+
+.block-form {
+  display: flex;
+  gap: 8px;
+}
+
+.block-form input {
+  flex: 1;
+  max-width: 280px;
+}
+
+.block-list {
+  display: grid;
+  margin-top: 14px;
+}
+
+.block-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.block-row:first-child {
+  border-top: none;
+}
+
+.block-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------- feed sources */
+
+.feed-section-title {
+  margin: 26px 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.feed-source-list {
+  display: grid;
+  gap: 10px;
+}
+
+.feed-source-group {
+  display: grid;
+  gap: 8px;
+}
+
+.card.feed-source {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 13px 16px;
+}
+
+.feed-source-child {
+  margin-left: 22px;
+}
+
+.feed-source-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.feed-source-name {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14.5px;
+  font-weight: 560;
+}
+
+.feed-source-count {
+  font-size: 12.5px;
+  font-weight: 400;
+}
+
+.feed-source-url {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
 
 .app-main {
@@ -340,6 +839,59 @@ code,
   font-size: 16px;
 }
 
+.home-hero {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+  padding: 20px 0 28px;
+  border-bottom: 1px solid var(--border);
+}
+
+.home-hero-text {
+  min-width: 0;
+}
+
+.home-kicker {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.home-hero-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+
+.feed-head {
+  margin-bottom: 14px;
+}
+
+.feed-count {
+  font-size: 13.5px;
+}
+
+.placeholder-panel {
+  padding: 64px 24px;
+}
+
+.placeholder-panel h1 {
+  margin-bottom: 10px;
+  font-size: 24px;
+}
+
+.placeholder-panel p {
+  max-width: 42ch;
+  margin: 0 auto 20px;
+}
+
 /* ------------------------------------------------------------ buttons */
 
 .btn {
@@ -362,7 +914,7 @@ code,
 
 .btn:hover:not(:disabled) {
   background: var(--surface-3);
-  border-color: #45454e;
+  border-color: var(--border-strong);
 }
 
 .btn:disabled {
@@ -395,12 +947,12 @@ code,
 
 .btn-danger {
   background: transparent;
-  border-color: #4a2422;
+  border-color: var(--danger-border);
   color: var(--danger);
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: #1e1010;
+  background: var(--danger-bg-hover);
   border-color: var(--danger);
 }
 
@@ -463,7 +1015,7 @@ textarea:focus,
 select:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(245 179 44 / 15%);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 15%);
 }
 
 input::placeholder,
@@ -474,9 +1026,9 @@ textarea::placeholder {
 .form-error {
   margin: 0 0 14px;
   padding: 9px 12px;
-  border: 1px solid #4a2422;
+  border: 1px solid var(--danger-border);
   border-radius: var(--radius-sm);
-  background: #170d0d;
+  background: var(--danger-bg);
   color: var(--danger);
   font-size: 13.5px;
 }
@@ -484,9 +1036,9 @@ textarea::placeholder {
 .form-ok {
   margin: 0 0 14px;
   padding: 9px 12px;
-  border: 1px solid #1e3a2a;
+  border: 1px solid var(--ok-border);
   border-radius: var(--radius-sm);
-  background: #0b1610;
+  background: var(--ok-bg);
   color: var(--ok);
   font-size: 13.5px;
 }
@@ -617,21 +1169,21 @@ textarea::placeholder {
 }
 
 .pill-accent {
-  border-color: rgb(245 179 44 / 35%);
-  background: rgb(245 179 44 / 12%);
+  border-color: rgb(var(--accent-rgb) / 35%);
+  background: rgb(var(--accent-rgb) / 12%);
   color: var(--accent-bright);
 }
 
 .pill-danger {
-  border-color: #4a2422;
-  background: #170d0d;
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
   color: var(--danger);
 }
 
 /* Site-wide announcement badge — distinct from a category pin. */
 .pill-global {
-  border-color: rgb(255 122 26 / 45%);
-  background: rgb(255 122 26 / 14%);
+  border-color: rgb(var(--orange-rgb) / 45%);
+  background: rgb(var(--orange-rgb) / 14%);
   color: var(--orange);
 }
 
@@ -657,7 +1209,7 @@ textarea::placeholder {
   overflow: hidden;
   flex: none;
   border-radius: 50%;
-  background: linear-gradient(140deg, #2a2a31, #17171b);
+  background: linear-gradient(140deg, var(--avatar-from), var(--avatar-to));
   color: var(--text-muted);
   font-weight: 650;
   text-transform: uppercase;
@@ -799,7 +1351,7 @@ textarea::placeholder {
   width: 42px;
   height: 42px;
   border-radius: 10px;
-  background: linear-gradient(140deg, rgb(245 179 44 / 18%), rgb(255 122 26 / 10%));
+  background: linear-gradient(140deg, rgb(var(--accent-rgb) / 18%), rgb(var(--orange-rgb) / 10%));
   color: var(--accent);
   font-size: 19px;
 }
@@ -867,8 +1419,8 @@ textarea::placeholder {
 }
 
 .tag-choice:has(input:checked) {
-  border-color: rgb(245 179 44 / 45%);
-  background: rgb(245 179 44 / 14%);
+  border-color: rgb(var(--accent-rgb) / 45%);
+  background: rgb(var(--accent-rgb) / 14%);
   color: var(--accent-bright);
 }
 
@@ -1006,7 +1558,7 @@ textarea::placeholder {
 }
 
 .post-content {
-  color: #e4e4e7;
+  color: var(--text-body);
   overflow-wrap: anywhere;
 }
 
@@ -1048,8 +1600,8 @@ textarea::placeholder {
 }
 
 .like-btn[aria-pressed='true'] {
-  border-color: rgb(245 179 44 / 45%);
-  background: rgb(245 179 44 / 14%);
+  border-color: rgb(var(--accent-rgb) / 45%);
+  background: rgb(var(--accent-rgb) / 14%);
   color: var(--accent-bright);
 }
 
@@ -1069,7 +1621,33 @@ textarea::placeholder {
 .profile-bio {
   max-width: 52ch;
   margin: 10px 0 0;
-  color: #d6d6da;
+  color: var(--text-body);
+}
+
+/* Public ban notice on a restricted account's profile. */
+.ban-banner {
+  margin-top: 16px;
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+}
+
+.ban-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.ban-banner-duration {
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.ban-banner-reason {
+  margin: 0;
+  color: var(--danger-ink);
+  font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 .profile-stats {
@@ -1481,7 +2059,7 @@ textarea::placeholder {
 
 .md-editor:focus-within {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(245 179 44 / 15%);
+  box-shadow: 0 0 0 3px rgb(var(--accent-rgb) / 15%);
 }
 
 .md-editor.is-disabled {
@@ -1610,7 +2188,7 @@ textarea::placeholder {
 /* --------------------------------------------------- rendered markdown */
 
 .markdown-body {
-  color: #e4e4e7;
+  color: var(--text-body);
   overflow-wrap: anywhere;
 }
 
@@ -1693,7 +2271,7 @@ textarea::placeholder {
   padding: 0;
   border: none;
   background: none;
-  color: #e4e4e7;
+  color: var(--text-body);
   font-size: 13px;
 }
 
@@ -1762,6 +2340,14 @@ textarea::placeholder {
 }
 
 @media (max-width: 720px) {
+  .home-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 16px;
+  }
+  .feed-source-child {
+    margin-left: 10px;
+  }
   .post-children {
     padding-left: 14px;
   }

@@ -31,6 +31,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 public/assets/uploads/
 uploads/
 
+# built SPA — generated into the served root by `bun run build`
+/public/index.html
+/public/assets/index-*
+
 # caches
 .eslintcache
 .cache

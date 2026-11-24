@@ -7,16 +7,18 @@ import {
   DialogRoot,
   DialogTitle,
 } from 'reka-ui'
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { errMessage, http } from '../api'
 import type { DmThreadDetailResponse, DmThreadsResponse } from '../api'
-import type { DmThreadRow } from '../../shared/types'
+import type { DmMessageRow, DmThreadRow } from '../../shared/types'
 import MarkdownEditor from '../components/MarkdownEditor.vue'
 import UserAvatar from '../components/UserAvatar.vue'
 import UserGroupBadge from '../components/UserGroupBadge.vue'
 import { renderMarkdown } from '../markdown'
-import { auth, groupById } from '../store'
+import { meta } from '../meta'
+import { auth, groupById, loadDmUnread, loadNotifications } from '../store'
+import { onLiveEvent } from '../events'
 
 const route = useRoute()
 const router = useRouter()
@@ -33,6 +35,22 @@ const form = ref({ title: '', participants: '', body: '' })
 const formError = ref('')
 
 const selectedId = computed(() => Number(route.params.id) || 0)
+// Credit gate: mirrors the server check so the composer is not offered in vain.
+const dmLocked = computed(
+  () =>
+    !!auth.user &&
+    !auth.user.banned &&
+    auth.user.role !== 'admin' &&
+    meta.dmMinCredit > 0 &&
+    auth.user.credit < meta.dmMinCredit,
+)
+const messagesBox = ref<HTMLElement | null>(null)
+
+async function scrollToBottom(): Promise<void> {
+  await nextTick()
+  const box = messagesBox.value
+  if (box) box.scrollTop = box.scrollHeight
+}
 const canDelete = computed(
   () =>
     !!detail.value &&
@@ -54,6 +72,9 @@ async function loadDetail(id: number): Promise<void> {
     await http.post(`/dm/threads/${id}/read`)
     const row = threads.value.find((t) => t.id === id)
     if (row) row.unreadCount = 0
+    void loadDmUnread()
+    void loadNotifications()
+    await scrollToBottom()
   } catch (err) {
     detail.value = null
     error.value = errMessage(err, '私信不存在或无权访问')
@@ -67,7 +88,7 @@ async function init(): Promise<void> {
     // `?to=alice` (from a profile) pre-fills a new conversation.
     const to = typeof route.query.to === 'string' ? route.query.to : ''
     if (selectedId.value) await loadDetail(selectedId.value)
-    else if (to) openNew(to)
+    else if (to && !dmLocked.value) openNew(to)
   } catch (err) {
     error.value = errMessage(err, '加载失败')
   } finally {
@@ -122,6 +143,7 @@ async function sendReply(): Promise<void> {
     replyBody.value = ''
     await loadDetail(id)
     await loadList()
+    await scrollToBottom()
   } catch (err) {
     notice.value = errMessage(err)
   }
@@ -143,6 +165,32 @@ const onCreatingChange = (value: boolean): void => {
   creating.value = value
 }
 
+/** A message pushed by the server: append in-place, or refresh a closed list. */
+async function onIncoming(payload: { threadId: number; message: DmMessageRow }): Promise<void> {
+  const { threadId, message } = payload
+  if (detail.value && detail.value.thread.id === threadId) {
+    if (!detail.value.messages.some((m) => m.id === message.id)) {
+      detail.value.messages.push(message)
+      await scrollToBottom()
+    }
+    if (message.authorId !== auth.user?.id) {
+      await http.post(`/dm/threads/${threadId}/read`).catch(() => {})
+      void loadNotifications()
+    }
+    await loadList()
+    void loadDmUnread()
+    return
+  }
+  await loadList()
+  void loadDmUnread()
+}
+
+const offLive = onLiveEvent('dm:message', (data) => {
+  const payload = data as { threadId: number; message: DmMessageRow }
+  if (payload?.message) void onIncoming(payload)
+})
+onUnmounted(offLive)
+
 const time = (iso: string) => iso.replace('T', ' ').slice(0, 16)
 const names = (thread: DmThreadRow | null | undefined): string =>
   (thread?.participants ?? []).map((p) => p.displayName).join('、') || '—'
@@ -157,8 +205,17 @@ const preview = (thread: DmThreadRow): string => (thread.lastMessage?.body ?? ''
         <p class="muted" style="margin: 6px 0 0">与站内成员一对一或多方交流。</p>
       </div>
       <span class="spacer"></span>
-      <button class="btn btn-primary btn-sm" type="button" @click="openNew()">新建私信</button>
+      <button v-if="!dmLocked" class="btn btn-primary btn-sm" type="button" @click="openNew()">
+        新建私信
+      </button>
     </div>
+
+    <p v-if="auth.user?.banned" class="form-error">
+      账号已被封禁：只能与管理员私信，无法向其他成员发起或回复私信。
+    </p>
+    <p v-if="dmLocked" class="form-error">
+      私信需要信用分不低于 {{ meta.dmMinCredit }} 分（当前 {{ auth.user?.credit }} 分），暂时无法发起或发送私信。
+    </p>
 
     <p v-if="error" class="form-error">{{ error }}</p>
     <div v-if="loading" class="empty">加载中…</div>
@@ -199,7 +256,7 @@ const preview = (thread: DmThreadRow): string => (thread.lastMessage?.body ?? ''
 
           <p v-if="notice" class="form-error">{{ notice }}</p>
 
-          <div class="dm-messages">
+          <div ref="messagesBox" class="dm-messages">
             <article v-for="message in detail.messages" :key="message.id" class="dm-message">
               <router-link
                 v-if="message.author"
@@ -221,7 +278,10 @@ const preview = (thread: DmThreadRow): string => (thread.lastMessage?.body ?? ''
             </article>
           </div>
 
-          <div class="dm-compose">
+          <div v-if="dmLocked" class="dm-compose">
+            <p class="dm-empty">信用分不足，暂时无法发送私信。</p>
+          </div>
+          <div v-else class="dm-compose">
             <MarkdownEditor v-model="replyBody" :rows="4" placeholder="写下你的消息…" />
             <div style="display: flex; justify-content: flex-end; margin-top: 10px">
               <button

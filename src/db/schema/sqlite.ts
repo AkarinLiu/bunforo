@@ -36,6 +36,7 @@ export const userGroups = sqliteTable('user_groups', {
   name: text('name').notNull().unique(),
   color: text('color').notNull(),
   position: integer('position').notNull(),
+  builtin: integer('builtin', { mode: 'boolean' }).notNull().default(false),
 })
 
 export const categories = sqliteTable('categories', {
@@ -121,6 +122,42 @@ export const dmMessages = sqliteTable('dm_messages', {
   createdAt: text('created_at').notNull(),
 })
 
+export const userBlocks = sqliteTable('user_blocks', {
+  blockerId: integer('blocker_id').notNull(),
+  blockedId: integer('blocked_id').notNull(),
+  createdAt: text('created_at').notNull(),
+})
+
+export const userWarnings = sqliteTable('user_warnings', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  adminId: integer('admin_id'),
+  reason: text('reason').notNull(),
+  createdAt: text('created_at').notNull(),
+})
+
+export const notifications = sqliteTable('notifications', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  userId: integer('user_id').notNull(),
+  type: text('type').notNull(),
+  actorId: integer('actor_id'),
+  threadId: integer('thread_id'),
+  postId: integer('post_id'),
+  dmThreadId: integer('dm_thread_id'),
+  body: text('body').notNull(),
+  excerpt: text('excerpt').notNull(),
+  readAt: text('read_at'),
+  createdAt: text('created_at').notNull(),
+})
+
+export const userSettings = sqliteTable('user_settings', {
+  userId: integer('user_id').primaryKey(),
+  notifyReply: integer('notify_reply', { mode: 'boolean' }).notNull(),
+  notifyMention: integer('notify_mention', { mode: 'boolean' }).notNull(),
+  notifyLike: integer('notify_like', { mode: 'boolean' }).notNull(),
+  notifyDm: integer('notify_dm', { mode: 'boolean' }).notNull(),
+})
+
 // Single row (id = 1); the DDL pins that with a CHECK constraint.
 export const settings = sqliteTable('settings', {
   id: integer('id').primaryKey(),
@@ -128,6 +165,9 @@ export const settings = sqliteTable('settings', {
   siteDescription: text('site_description').notNull(),
   siteNotice: text('site_notice').notNull(),
   siteFooter: text('site_footer').notNull(),
+  dmMinCredit: integer('dm_min_credit').notNull().default(0),
+  creditMax: integer('credit_max').notNull().default(1000),
+  creditRecoverMinutes: integer('credit_recover_minutes').notNull().default(0),
 })
 
 export const reportReasons = sqliteTable('report_reasons', {
