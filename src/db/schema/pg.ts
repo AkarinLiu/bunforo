@@ -18,6 +18,8 @@ export const users = pgTable('users', {
   email: text('email').notNull(),
   emailVerified: boolean('email_verified').notNull(),
   sessionVersion: integer('session_version').notNull(),
+  githubLogin: text('github_login'),
+  githubId: text('github_id'),
 })
 
 export const emailTokens = pgTable('email_tokens', {
@@ -56,6 +58,7 @@ export const threads = pgTable('threads', {
   viewCount: integer('view_count').notNull(),
   createdAt: text('created_at').notNull(),
   lastPostAt: text('last_post_at').notNull(),
+  externalId: text('external_id'),
 })
 
 export const posts = pgTable('posts', {
@@ -65,6 +68,7 @@ export const posts = pgTable('posts', {
   parentId: integer('parent_id'),
   body: text('body').notNull(),
   createdAt: text('created_at').notNull(),
+  externalId: text('external_id'),
 })
 
 export const postLikes = pgTable('post_likes', {

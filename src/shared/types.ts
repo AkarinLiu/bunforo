@@ -58,6 +58,10 @@ export interface UserRow {
 /** Auth path only — never serialize this to the client. */
 export interface UserAuthRow extends UserRow {
   passwordHash: string
+  /** GitHub login, lowercased; null for ordinary accounts. Claim key for OAuth. */
+  githubLogin: string | null
+  /** GitHub numeric user id as text; null when GitHub did not expose one (bots). */
+  githubId: string | null
 }
 
 /** A display group members are assigned to; carries a badge colour, not permissions. */

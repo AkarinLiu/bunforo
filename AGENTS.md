@@ -1,4 +1,4 @@
-# buntalk — Agent Notes
+# BunForo — Agent Notes
 
 A forum framework: Bun + Hono backend, Vue 3 + Vite frontend, Reka UI components,
 and one codebase that runs on SQLite, PostgreSQL or MySQL.
@@ -10,6 +10,7 @@ and one codebase that runs on SQLite, PostgreSQL or MySQL.
 - API only: `bun run start` → :3000, serves `dist/` too if it has been built
 - Build frontend: `bun run build` → `dist/`
 - Migrate uploads to S3: `bun run migrate:s3`
+- Import GitHub Discussions: `bun run import:github` (needs `GITHUB_TOKEN` + `GITHUB_REPO`)
 - Typecheck: `bun run typecheck` (`tsc --noEmit`)
 - Tests: `bun test`
 
@@ -21,8 +22,8 @@ and one codebase that runs on SQLite, PostgreSQL or MySQL.
 - Frontend: Vue 3.5 `<script setup>`, vue-router 5, Vite 8
 - UI: Reka UI 2 (headless — all styling is in `src/web/style.css`)
 - Markdown: markdown-it 15, configured safe-by-construction (see below)
-- Storage: local disk or any S3-compatible bucket, via `aws4fetch` (SigV4 over
-  `fetch` — no AWS SDK)
+- Storage: local disk or any S3-compatible bucket, via Bun's native
+  `Bun.S3Client` (no AWS SDK, no aws4fetch)
 
 ## Layout
 
@@ -32,7 +33,12 @@ src/shared/types.ts      row contract, imported by BOTH db and web (dependency-f
 src/db/ddl.ts            hand-written bootstrap DDL, one list per dialect
 src/db/schema/{sqlite,pg,mysql}.ts   Drizzle table defs, one file per dialect
 src/db/index.ts          picks a driver from DATABASE_URL, exports db/tables
+src/db/legacy.ts         one-off buntalk.db → bunforo.db rename on boot
 src/db/repo.ts           every query, written once for all three engines
+src/import/github/       Discussions import: mapper, GraphQL client, media, writer
+src/import/github/media.ts  download GitHub-hosted images/video and rewrite bodies
+src/server/github.ts     GitHub OAuth login and placeholder-account claim
+src/server/legacy-uploads.ts  ./uploads → ./public/assets/uploads upgrade move
 src/server/app.ts        Hono app: /api first, /uploads, static SPA last
 src/server/routes.ts     the whole API surface
 src/server/storage.ts    local/S3 object storage, one `put`/`publicUrl` pair
@@ -41,6 +47,7 @@ src/server/filetype.ts   magic-byte sniffing — the upload security boundary
 src/web/                 Vue app; `pages/` are routes, `components/` are pieces
 src/web/markdown.ts      the markdown renderer — a security boundary, see below
 scripts/migrate-to-s3.ts one-shot local → bucket copy
+scripts/import-github.ts GitHub Discussions import CLI
 test/                    bun:test checks: db, post tree, markdown, uploads, s3
 bunfig.toml              test preload; keeps tests off the real db/upload dir
 ```
@@ -116,6 +123,67 @@ makes the override a lie.
 **`/uploads/*` is not under `/api`.** Anything that routes `/api` must route
 `/uploads` too — that is why `vite.config.ts` has a second proxy entry, and why
 the SPA fallback had to learn to keep its hands off both.
+
+**Uploads moved, but their public URL did not.** Files default to
+`./public/assets/uploads`; when the effective path is that default (including an
+explicit `UPLOAD_DIR=./public/assets/uploads` copied from the example),
+`migrateLegacyUploadDir()` adopts a leftover `./uploads` on boot — renaming it
+when the target is absent, merging missing keys when it already exists, so old
+`/uploads/<key>` URLs do not 404. A failed move/merge aborts startup. Stored
+bodies and avatars still hold `/uploads/<key>`, served by Hono from `uploadDir`;
+never write the filesystem path or an S3 URL into the database. `vite.config.ts`
+sets `publicDir: false` so a build cannot copy runtime uploads into `dist/`.
+
+**Video is in the upload allowlist now; SVG still is not.** `filetype.ts` accepts
+MP4/MOV brands inside ISO-BMFF and WebM (EBML DocType `webm`, not Matroska).
+`MAX_UPLOAD_MB` caps images/PDF, `MAX_VIDEO_MB` caps video, and the Bun body cap
+in `index.ts` must stay at the larger of the two.
+
+**Imported media is downloaded, never hot-linked.** `src/import/github/media.ts`
+only fetches GitHub-owned hosts (discussion bodies are attacker-controlled, so
+arbitrary URLs would be SSRF), judges the bytes with `sniff()`, stores them via
+`storage.put`, and rewrites the body to `/uploads/<key>`. The token is attached
+only to `github.com`; signed `*.githubusercontent.com` URLs must not receive it.
+HTML `<img>` becomes Markdown (the renderer escapes raw HTML) and `<video>`
+becomes a link (there is no player). A download failure leaves the original URL
+and does not fail the thread.
+
+**S3 is Bun's native client.** `storage.ts` builds a `Bun.S3Client` only for the
+s3 driver and uses `write`/`exists`/`presign`/`list`. `virtualHostedStyle` is
+`!endpoint`: AWS gets the bucket-host form, MinIO/R2 keep path-style. Presigning
+is local, so `publicUrl` still mints a fresh 302 target per request. The bucket
+layout is root-level `<uuid>.<ext>`; `migrate:s3` lists keys first and skips
+objects already there.
+
+**The default SQLite filename is a compatibility surface.** `src/db/index.ts`
+opens `./bunforo.db`; when `DATABASE_URL` is unset, `migrateLegacySqliteFile()`
+renames a leftover `./buntalk.db` (and `-wal`/`-shm`) before the connection is
+opened. A failed rename must abort startup — falling back to an empty database is
+exactly the silent data loss this exists to prevent. An explicit `DATABASE_URL`
+never triggers it. The session cookie is still `buntalk_session`: renaming it
+would log every existing user out, so it is a deliberate legacy literal.
+
+**Imported rows carry a namespaced external id, and that is the idempotency key.**
+`threads.external_id` is `github:<discussion node id>`; `posts.external_id` is
+`github:<comment node id>`. The opening post has **no** external id (GitHub has
+no node id for it) — find it with `findOpeningPostId`. `createThread`/`createPost`
+always stamp "now"; imports must use `createImportedThread`/`createImportedPost`
+so source timestamps survive. There is still no transaction API: a failed import
+leaves a partial thread and the next run repairs it, which is why the writer
+skips existing external ids instead of trusting a clean run.
+
+**A GitHub placeholder account has `password_hash = ''` on purpose.** `/auth/login`
+routes an empty hash through its dummy verify, so no password can ever match; the
+owner signs in through OAuth. `github_login` (lowercased, nullable, unique) is the
+identity key — never the username, which is a generated `gh_*` slug. `github_id`
+is nullable because bots expose no `databaseId`. The OAuth claim refuses a
+different numeric id for the same login (recycled-login takeover).
+
+**The OAuth state cookie lives in `auth.ts`.** `SECRET` is module-private there,
+so `setOauthStateCookie`/`takeOauthStateCookie` must stay in that file; the route
+in `routes.ts` only encodes `{state, next}`. `next` is same-site-only (no `//`,
+no `/api`). The import CLI refuses to run when `countUsers() === 0`: creating
+placeholder users before `/setup` would make the site permanently admin-less.
 
 **Tests must stay off the real database and upload directory.** `bunfig.toml`
 preloads `test/setup.ts`, which pins `DATABASE_URL=:memory:`,

@@ -38,7 +38,7 @@ import type {
 } from '../shared/types'
 
 /** Shown until the setup wizard (or an admin) writes a real name. */
-export const DEFAULT_SITE_NAME = 'buntalk'
+export const DEFAULT_SITE_NAME = 'BunForo'
 
 const nowISO = () => new Date().toISOString()
 
@@ -80,6 +80,68 @@ export async function findUserById(id: number): Promise<UserAuthRow | null> {
 export async function findUserByUsername(username: string): Promise<UserAuthRow | null> {
   const rows: any[] = await db.select().from(t.users).where(eq(t.users.username, username)).limit(1)
   return (rows[0] as UserAuthRow) ?? null
+}
+
+/** GitHub logins are stored lowercased; so is the lookup. */
+export async function findUserByGithubLogin(login: string): Promise<UserAuthRow | null> {
+  const rows: any[] = await db
+    .select()
+    .from(t.users)
+    .where(eq(t.users.githubLogin, login.toLowerCase()))
+    .limit(1)
+  return (rows[0] as UserAuthRow) ?? null
+}
+
+/** Every username, for deterministic placeholder-name collision checks. */
+export async function listUsernames(): Promise<Set<string>> {
+  const rows: any[] = await db.select({ username: t.users.username }).from(t.users)
+  return new Set(rows.map((r: any) => String(r.username)))
+}
+
+export async function linkGithubAccount(
+  id: number,
+  input: { githubLogin: string; githubId: string | null },
+): Promise<void> {
+  await db
+    .update(t.users)
+    .set({ githubLogin: input.githubLogin.toLowerCase(), githubId: input.githubId })
+    .where(eq(t.users.id, id))
+}
+
+/**
+ * A password-less account carrying a GitHub identity. The empty hash makes
+ * /auth/login take its dummy-verify path, so no password can ever match; the
+ * real owner signs in through OAuth and claims the account.
+ */
+export async function createGithubUser(input: {
+  username: string
+  displayName: string
+  avatarUrl: string
+  email: string
+  emailVerified: boolean
+  githubLogin: string
+  githubId: string | null
+  createdAt: string
+}): Promise<number> {
+  return insertReturningId(t.users, {
+    username: input.username,
+    displayName: input.displayName,
+    passwordHash: '',
+    bio: '',
+    avatarUrl: input.avatarUrl,
+    role: 'user',
+    groupId: null,
+    banned: false,
+    credit: CREDIT_START,
+    banReason: '',
+    bannedUntil: null,
+    email: input.email,
+    emailVerified: input.emailVerified,
+    sessionVersion: 0,
+    githubLogin: input.githubLogin.toLowerCase(),
+    githubId: input.githubId,
+    createdAt: input.createdAt,
+  })
 }
 
 /** Any account holding this email, verified or not (uniqueness checks). */
@@ -143,7 +205,7 @@ export async function ensureSystemUser(): Promise<void> {
   // that references it depends on.
   if (!(await findUserById(SYSTEM_USER_ID))) {
     throw new Error(
-      `[buntalk] could not create the system user (id ${SYSTEM_USER_ID}); this database does not allow negative ids`,
+      `[bunforo] could not create the system user (id ${SYSTEM_USER_ID}); this database does not allow negative ids`,
     )
   }
 }
@@ -657,6 +719,98 @@ export async function createThread(input: {
     await db.insert(t.threadTags).values(tagIds.map((tagId) => ({ threadId, tagId })))
   }
   return threadId
+}
+
+export async function findThreadIdByExternalId(externalId: string): Promise<number | null> {
+  const rows: any[] = await db
+    .select({ id: t.threads.id })
+    .from(t.threads)
+    .where(eq(t.threads.externalId, externalId))
+    .limit(1)
+  return rows[0] ? Number(rows[0].id) : null
+}
+
+/** The one post with parent_id NULL — what top-level imported comments attach to. */
+export async function findOpeningPostId(threadId: number): Promise<number | null> {
+  const rows: any[] = await db
+    .select({ id: t.posts.id })
+    .from(t.posts)
+    .where(and(eq(t.posts.threadId, threadId), sql`${t.posts.parentId} IS NULL`))
+    .limit(1)
+  return rows[0] ? Number(rows[0].id) : null
+}
+
+/** External id → local post id, for incremental re-imports and reply parenting. */
+export async function listPostRefs(threadId: number): Promise<Map<string, number>> {
+  const rows: any[] = await db
+    .select({ id: t.posts.id, externalId: t.posts.externalId })
+    .from(t.posts)
+    .where(eq(t.posts.threadId, threadId))
+  const refs = new Map<string, number>()
+  for (const r of rows) if (r.externalId != null) refs.set(String(r.externalId), Number(r.id))
+  return refs
+}
+
+export async function updateThreadLastPostAt(id: number, iso: string): Promise<void> {
+  await db.update(t.threads).set({ lastPostAt: iso }).where(eq(t.threads.id, id))
+}
+
+/**
+ * Import-only writer: unlike createThread it preserves the source timestamps and
+ * stores the external id used to make re-runs idempotent. The opening post has
+ * no GitHub node id, so its external_id stays NULL.
+ */
+export async function createImportedThread(input: {
+  categoryId: number
+  authorId: number
+  title: string
+  body: string
+  createdAt: string
+  lastPostAt: string
+  externalId: string
+  isLocked: boolean
+}): Promise<number> {
+  const threadId = await insertReturningId(t.threads, {
+    categoryId: input.categoryId,
+    authorId: input.authorId,
+    title: input.title,
+    isPinned: false,
+    isGlobalPinned: false,
+    isAllBoardsPinned: false,
+    isLocked: input.isLocked,
+    createdAt: input.createdAt,
+    lastPostAt: input.lastPostAt,
+    viewCount: 0,
+    externalId: input.externalId,
+  })
+  await insertReturningId(t.posts, {
+    threadId,
+    authorId: input.authorId,
+    parentId: null,
+    body: input.body,
+    createdAt: input.createdAt,
+    externalId: null,
+  })
+  return threadId
+}
+
+/** Import-only writer: explicit time, no lastPostAt bump (the importer sets it once). */
+export async function createImportedPost(input: {
+  threadId: number
+  authorId: number
+  parentId: number
+  body: string
+  createdAt: string
+  externalId: string
+}): Promise<number> {
+  return insertReturningId(t.posts, {
+    threadId: input.threadId,
+    authorId: input.authorId,
+    parentId: input.parentId,
+    body: input.body,
+    createdAt: input.createdAt,
+    externalId: input.externalId,
+  })
 }
 
 export async function setThreadFlag(

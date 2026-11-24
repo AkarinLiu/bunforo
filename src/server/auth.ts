@@ -18,15 +18,17 @@ import { mailConfigured } from './mailer'
 import { toSelfUser } from '../shared/types'
 import type { PublicUser, SelfUser } from '../shared/types'
 
+// Deliberately unchanged by the BunForo rename: a new cookie name would log
+// every existing session out. This literal is a compatibility key, not branding.
 const COOKIE = 'buntalk_session'
 
 function resolveSecret(): string {
   const secret = process.env.SESSION_SECRET
   if (secret) return secret
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('[buntalk] SESSION_SECRET must be set when NODE_ENV=production')
+    throw new Error('[bunforo] SESSION_SECRET must be set when NODE_ENV=production')
   }
-  return 'buntalk-insecure-dev-secret'
+  return 'bunforo-insecure-dev-secret'
 }
 
 const SECRET = resolveSecret()
@@ -69,6 +71,26 @@ export async function startSession(
 
 export async function endSession(c: Context): Promise<void> {
   deleteCookie(c, COOKIE, { path: '/' })
+}
+
+/** Signed, short-lived OAuth state. Lives here because SECRET is module-private. */
+const GH_STATE_COOKIE = 'bunforo_gh_state'
+
+export async function setOauthStateCookie(c: Context, payload: string): Promise<void> {
+  await setSignedCookie(c, GH_STATE_COOKIE, payload, SECRET, {
+    httpOnly: true,
+    sameSite: 'Lax',
+    path: '/',
+    maxAge: 600,
+    secure: process.env.NODE_ENV === 'production',
+  })
+}
+
+/** Reads and clears the state cookie in one step: it must not be reusable. */
+export async function takeOauthStateCookie(c: Context): Promise<string | null> {
+  const raw = await getSignedCookie(c, SECRET, GH_STATE_COOKIE)
+  deleteCookie(c, GH_STATE_COOKIE, { path: '/' })
+  return typeof raw === 'string' ? raw : null
 }
 
 export const currentUser = (c: Context<AppEnv>): SelfUser | null => c.get('user')

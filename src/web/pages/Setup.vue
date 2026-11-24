@@ -59,7 +59,7 @@ async function submit(): Promise<void> {
   submitting.value = true
   try {
     const payload = {
-      siteName: siteName.value.trim() || 'buntalk',
+      siteName: siteName.value.trim() || 'BunForo',
       siteDescription: siteDescription.value.trim(),
       username: username.value.trim(),
       displayName: displayName.value.trim(),
@@ -91,7 +91,7 @@ async function submit(): Promise<void> {
           <svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z" />
           </svg>
-          buntalk
+          BunForo
         </span>
         <h1>初始化向导</h1>
         <p class="muted">第一次运行，用几步把站点搭起来。</p>
@@ -113,7 +113,7 @@ async function submit(): Promise<void> {
       <div v-if="step === 0">
         <label class="field">
           <span>站点名称</span>
-          <input v-model="siteName" type="text" maxlength="50" placeholder="buntalk" />
+          <input v-model="siteName" type="text" maxlength="50" placeholder="BunForo" />
         </label>
         <label class="field">
           <span>站点简介（可选）</span>

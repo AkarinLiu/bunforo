@@ -12,21 +12,33 @@
  * Works with AWS S3, Cloudflare R2, MinIO, Backblaze B2 and Spaces. A custom
  * endpoint is addressed path-style, which MinIO requires and R2 accepts.
  */
-import { AwsClient } from 'aws4fetch'
 import { mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { DEFAULT_UPLOAD_DIR, migrateLegacyUploadDir } from './legacy-uploads'
 
 const endpoint = (process.env.S3_ENDPOINT ?? '').trim().replace(/\/+$/, '')
 const bucket = (process.env.S3_BUCKET ?? '').trim()
-const region = (process.env.S3_REGION ?? '').trim() || 'auto'
+// R2 expects "auto"; AWS has real regions and rejects virtual-host with a
+// made-up one. A custom endpoint almost always means an S3 clone (R2/MinIO).
+const region = (process.env.S3_REGION ?? '').trim() || (endpoint ? 'auto' : 'us-east-1')
 const accessKeyId = (process.env.S3_ACCESS_KEY_ID ?? '').trim()
 const secretAccessKey = (process.env.S3_SECRET_ACCESS_KEY ?? '').trim()
+const sessionToken = (process.env.S3_SESSION_TOKEN ?? '').trim()
 const publicBase = (process.env.S3_PUBLIC_URL ?? '').trim().replace(/\/+$/, '')
 const urlTtlSeconds = Number(process.env.S3_URL_TTL) || 3600
 
-export const uploadDir = (process.env.UPLOAD_DIR ?? '').trim() || './uploads'
+const configuredDir = (process.env.UPLOAD_DIR ?? '').trim()
+// Adopt the legacy directory when the effective path is the default — including
+// an explicit `UPLOAD_DIR=./public/assets/uploads` copied from .env.example.
+// Any other explicit path is obeyed untouched.
+const usesDefaultDir = !configuredDir || resolve(configuredDir) === resolve(DEFAULT_UPLOAD_DIR)
+if (usesDefaultDir) migrateLegacyUploadDir()
+
+export const uploadDir = configuredDir || DEFAULT_UPLOAD_DIR
 
 export const maxUploadBytes = (Number(process.env.MAX_UPLOAD_MB) || 5) * 1024 * 1024
+/** Video uploads are larger than images; the body cap in index.ts follows this. */
+export const maxVideoBytes = (Number(process.env.MAX_VIDEO_MB) || 50) * 1024 * 1024
 
 const configured = Boolean(bucket && accessKeyId && secretAccessKey)
 const requested = (process.env.STORAGE_DRIVER ?? '').trim().toLowerCase()
@@ -39,14 +51,29 @@ export const driver: Driver =
 
 if (driver === 's3' && !configured) {
   throw new Error(
-    '[buntalk] STORAGE_DRIVER=s3 requires S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY',
+    '[bunforo] STORAGE_DRIVER=s3 requires S3_BUCKET, S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY',
   )
 }
 
 // Built only for the s3 driver. Branching on `driver` (not on `configured`)
 // everywhere below is what makes STORAGE_DRIVER=local a hard override even when
 // credentials happen to be present.
-const s3 = driver === 's3' ? new AwsClient({ accessKeyId, secretAccessKey, service: 's3', region }) : null
+//
+// Bun's native S3 client signs and uploads in-process — no AWS SDK/aws4fetch.
+// Its default is path-style; AWS's virtual-host form is opted into explicitly,
+// and custom endpoints (MinIO/R2) keep the path-style form they already used.
+const s3 =
+  driver === 's3'
+    ? new Bun.S3Client({
+        accessKeyId,
+        secretAccessKey,
+        bucket,
+        region,
+        ...(endpoint ? { endpoint } : {}),
+        ...(sessionToken ? { sessionToken } : {}),
+        virtualHostedStyle: !endpoint,
+      })
+    : null
 
 /** Human-readable destination, for startup logs and the migration script. */
 export const s3Target = configured
@@ -65,12 +92,6 @@ export function isValidKey(key: string): boolean {
 
 const encodeKey = (key: string) => key.split('/').map(encodeURIComponent).join('/')
 
-function objectUrl(key: string): string {
-  const encoded = encodeKey(key)
-  if (endpoint) return `${endpoint}/${bucket}/${encoded}`
-  return `https://${bucket}.s3.${region}.amazonaws.com/${encoded}`
-}
-
 export async function put(key: string, bytes: Uint8Array, contentType: string): Promise<void> {
   if (!s3) {
     await mkdir(uploadDir, { recursive: true })
@@ -78,14 +99,8 @@ export async function put(key: string, bytes: Uint8Array, contentType: string): 
     return
   }
 
-  const res = await s3.fetch(objectUrl(key), {
-    method: 'PUT',
-    body: bytes,
-    headers: { 'Content-Type': contentType },
-  })
-  if (!res.ok) {
-    throw new Error(`S3 PUT ${key} failed: ${res.status} ${await res.text()}`)
-  }
+  // Bun writes the object and sets Content-Type in one call.
+  await s3.write(key, bytes, { type: contentType })
 }
 
 /**
@@ -93,22 +108,40 @@ export async function put(key: string, bytes: Uint8Array, contentType: string): 
  * bytes itself (the local driver does, via `serveStatic`).
  *
  * With `S3_PUBLIC_URL` the object is assumed publicly readable and is linked
- * directly; otherwise the URL is presigned, and a fresh signature is minted per
- * request — which is also why the redirect below is a 302 and never a 301.
+ * directly; otherwise the URL is presigned locally (no network round-trip), and
+ * a fresh signature is minted per request — which is why the redirect below is a
+ * 302 and never a 301.
  */
 export async function publicUrl(key: string): Promise<string | null> {
   if (!s3) return null
   if (publicBase) return `${publicBase}/${encodeKey(key)}`
-
-  const url = new URL(objectUrl(key))
-  url.searchParams.set('X-Amz-Expires', String(urlTtlSeconds))
-  const signed = await s3.sign(url, { aws: { signQuery: true } })
-  return signed.url
+  return s3.presign(key, { expiresIn: urlTtlSeconds })
 }
 
 /** S3 only: confirms an object landed. Used by the migration's sanity check. */
 export async function exists(key: string): Promise<boolean> {
   if (!s3) return false
-  const res = await s3.fetch(objectUrl(key), { method: 'HEAD' })
-  return res.ok
+  return s3.exists(key)
+}
+
+/**
+ * Every key in the bucket, for the manual migration. Bun's list is paginated;
+ * the bucket is expected to be dedicated to this forum, matching the old
+ * root-level key layout (`<uuid>.<ext>`).
+ */
+export async function listKeys(): Promise<Set<string>> {
+  const keys = new Set<string>()
+  if (!s3) return keys
+  let startAfter: string | undefined
+  for (;;) {
+    const page: any = await (s3 as any).list({
+      maxKeys: 1000,
+      ...(startAfter ? { startAfter } : {}),
+    })
+    const contents: any[] = page?.contents ?? []
+    for (const item of contents) if (item?.key) keys.add(String(item.key))
+    if (!page?.isTruncated || contents.length === 0) break
+    startAfter = contents[contents.length - 1]?.key
+  }
+  return keys
 }

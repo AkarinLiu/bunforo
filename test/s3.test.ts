@@ -4,8 +4,8 @@
  *
  * No bucket is needed: what is checked here is the part that is ours and can
  * silently be wrong — how the object URL is built (path-style vs virtual-host)
- * and whether signing is skipped when a public URL is configured. The
- * signature itself is aws4fetch's job.
+ * and whether signing is skipped when a public URL is configured. Signing and
+ * URL building are Bun's native S3 client's job.
  */
 import { describe, expect, test } from 'bun:test'
 import { join } from 'node:path'
@@ -23,6 +23,7 @@ const S3_KEYS = [
   'S3_REGION',
   'S3_ACCESS_KEY_ID',
   'S3_SECRET_ACCESS_KEY',
+  'S3_SESSION_TOKEN',
   'S3_PUBLIC_URL',
   'S3_URL_TTL',
 ] as const

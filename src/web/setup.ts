@@ -14,7 +14,7 @@ export const setup = reactive({
   needed: false,
   /** the status request has resolved, so the guard stops refetching */
   checked: false,
-  siteName: 'buntalk',
+  siteName: 'BunForo',
   siteDescription: '',
   /** home-page announcement (Markdown); '' hides it */
   siteNotice: '',

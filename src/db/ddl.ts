@@ -36,6 +36,8 @@ const sqlite = {
       email TEXT NOT NULL DEFAULT '',
       email_verified INTEGER NOT NULL DEFAULT 0,
       session_version INTEGER NOT NULL DEFAULT 0,
+      github_login TEXT,
+      github_id TEXT,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS email_tokens (
@@ -71,7 +73,8 @@ const sqlite = {
       is_all_boards_pinned INTEGER NOT NULL DEFAULT 0,
       view_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
-      last_post_at TEXT NOT NULL
+      last_post_at TEXT NOT NULL,
+      external_id TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS posts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +82,8 @@ const sqlite = {
       author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       parent_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      external_id TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS post_likes (
       post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -164,6 +168,10 @@ const sqlite = {
     `ALTER TABLE users ADD COLUMN group_id INTEGER REFERENCES user_groups(id) ON DELETE SET NULL`,
     `ALTER TABLE settings ADD COLUMN site_notice TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE settings ADD COLUMN site_footer TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN github_login TEXT`,
+    `ALTER TABLE users ADD COLUMN github_id TEXT`,
+    `ALTER TABLE threads ADD COLUMN external_id TEXT`,
+    `ALTER TABLE posts ADD COLUMN external_id TEXT`,
   ],
   indexes: [
     `CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category_id)`,
@@ -175,6 +183,10 @@ const sqlite = {
     `CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)`,
     `CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_type, target_id)`,
     `CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_users_github_login ON users(github_login)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_users_github_id ON users(github_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_threads_external ON threads(external_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_external ON posts(external_id)`,
     `CREATE INDEX IF NOT EXISTS idx_users_group ON users(group_id)`,
     `CREATE INDEX IF NOT EXISTS idx_dm_participants_user ON dm_participants(user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_dm_messages_thread ON dm_messages(thread_id)`,
@@ -200,6 +212,8 @@ const pg = {
       email TEXT NOT NULL DEFAULT '',
       email_verified BOOLEAN NOT NULL DEFAULT FALSE,
       session_version INTEGER NOT NULL DEFAULT 0,
+      github_login TEXT,
+      github_id TEXT,
       created_at TEXT NOT NULL
     )`,
     `CREATE TABLE IF NOT EXISTS email_tokens (
@@ -235,7 +249,8 @@ const pg = {
       is_all_boards_pinned BOOLEAN NOT NULL DEFAULT FALSE,
       view_count INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
-      last_post_at TEXT NOT NULL
+      last_post_at TEXT NOT NULL,
+      external_id TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS posts (
       id SERIAL PRIMARY KEY,
@@ -243,7 +258,8 @@ const pg = {
       author_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       parent_id INTEGER REFERENCES posts(id) ON DELETE CASCADE,
       body TEXT NOT NULL,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      external_id TEXT
     )`,
     `CREATE TABLE IF NOT EXISTS post_likes (
       post_id INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
@@ -328,6 +344,10 @@ const pg = {
     `ALTER TABLE users ADD COLUMN group_id INTEGER REFERENCES user_groups(id) ON DELETE SET NULL`,
     `ALTER TABLE settings ADD COLUMN site_notice TEXT NOT NULL DEFAULT ''`,
     `ALTER TABLE settings ADD COLUMN site_footer TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN github_login TEXT`,
+    `ALTER TABLE users ADD COLUMN github_id TEXT`,
+    `ALTER TABLE threads ADD COLUMN external_id TEXT`,
+    `ALTER TABLE posts ADD COLUMN external_id TEXT`,
   ],
   indexes: [
     `CREATE INDEX IF NOT EXISTS idx_threads_category ON threads(category_id)`,
@@ -339,6 +359,10 @@ const pg = {
     `CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)`,
     `CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_type, target_id)`,
     `CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_users_github_login ON users(github_login)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_users_github_id ON users(github_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_threads_external ON threads(external_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_external ON posts(external_id)`,
     `CREATE INDEX IF NOT EXISTS idx_users_group ON users(group_id)`,
     `CREATE INDEX IF NOT EXISTS idx_dm_participants_user ON dm_participants(user_id)`,
     `CREATE INDEX IF NOT EXISTS idx_dm_messages_thread ON dm_messages(thread_id)`,
@@ -367,6 +391,8 @@ const mysql = {
       email VARCHAR(254) NOT NULL DEFAULT '',
       email_verified TINYINT(1) NOT NULL DEFAULT 0,
       session_version INT NOT NULL DEFAULT 0,
+      github_login VARCHAR(191) NULL,
+      github_id VARCHAR(191) NULL,
       created_at VARCHAR(40) NOT NULL,
       UNIQUE KEY uq_users_username (username)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`,
@@ -408,6 +434,7 @@ const mysql = {
       view_count INT NOT NULL DEFAULT 0,
       created_at VARCHAR(40) NOT NULL,
       last_post_at VARCHAR(40) NOT NULL,
+      external_id VARCHAR(191) NULL,
       KEY idx_threads_category (category_id),
       KEY idx_threads_last_post (last_post_at),
       CONSTRAINT fk_threads_category FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
@@ -420,6 +447,7 @@ const mysql = {
       parent_id INT NULL,
       body TEXT NOT NULL,
       created_at VARCHAR(40) NOT NULL,
+      external_id VARCHAR(191) NULL,
       KEY idx_posts_thread (thread_id),
       CONSTRAINT fk_posts_thread FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE,
       CONSTRAINT fk_posts_author FOREIGN KEY (author_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -535,9 +563,19 @@ const mysql = {
     `ALTER TABLE users ADD CONSTRAINT fk_users_group FOREIGN KEY (group_id) REFERENCES user_groups(id) ON DELETE SET NULL`,
     `ALTER TABLE settings ADD COLUMN site_notice VARCHAR(2000) NOT NULL DEFAULT ''`,
     `ALTER TABLE settings ADD COLUMN site_footer VARCHAR(500) NOT NULL DEFAULT ''`,
+    `ALTER TABLE users ADD COLUMN github_login VARCHAR(191) NULL`,
+    `ALTER TABLE users ADD COLUMN github_id VARCHAR(191) NULL`,
+    `ALTER TABLE threads ADD COLUMN external_id VARCHAR(191) NULL`,
+    `ALTER TABLE posts ADD COLUMN external_id VARCHAR(191) NULL`,
   ],
   // Tolerant: MySQL has no CREATE INDEX IF NOT EXISTS, so a re-run just fails.
-  indexes: [`CREATE INDEX idx_users_email ON users(email)`] as string[],
+  indexes: [
+    `CREATE INDEX idx_users_email ON users(email)`,
+    `CREATE UNIQUE INDEX uq_users_github_login ON users(github_login)`,
+    `CREATE UNIQUE INDEX uq_users_github_id ON users(github_id)`,
+    `CREATE UNIQUE INDEX uq_threads_external ON threads(external_id)`,
+    `CREATE UNIQUE INDEX uq_posts_external ON posts(external_id)`,
+  ] as string[],
 }
 
 export const DDL: Record<Dialect, { tables: string[]; patches: string[]; indexes: string[] }> = {

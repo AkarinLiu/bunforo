@@ -32,7 +32,7 @@ describe('first-run setup', () => {
     const r = JSON.parse(stdout)
 
     expect(r.before.needsSetup).toBe(true)
-    expect(r.before.siteName).toBe('buntalk')
+    expect(r.before.siteName).toBe('BunForo')
 
     // A bad admin is refused before anything is written.
     expect(r.badStatus).toBe(400)

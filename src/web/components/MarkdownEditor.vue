@@ -61,11 +61,13 @@ async function onPick(event: Event): Promise<void> {
   uploading.value = true
   uploadError.value = ''
   try {
-    const { url } = await uploadFile(file)
+    const { url, mime } = await uploadFile(file)
     // The filename would otherwise be able to close the alt text and inject
     // markdown of its own — it is user input like anything else.
     const alt = file.name.replace(/[[\]()\r\n]/g, '').slice(0, 80)
-    insert(`![${alt}](${url})`)
+    // Images embed; PDF and video become links (the renderer has no player, and
+    // an image tag around a PDF renders as a broken image).
+    insert(mime.startsWith('image/') ? `![${alt}](${url})` : `[${alt}](${url})`)
   } catch (err) {
     uploadError.value = errMessage(err, '上传失败')
   } finally {
@@ -178,7 +180,7 @@ defineExpose({ focus })
         ref="picker"
         class="hidden-file"
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp,image/avif,application/pdf"
+        accept="image/png,image/jpeg,image/gif,image/webp,image/avif,application/pdf,video/mp4,video/webm,video/quicktime"
         @change="onPick"
       />
 

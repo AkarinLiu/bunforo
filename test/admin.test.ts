@@ -40,6 +40,12 @@ describe('admin ban over HTTP', () => {
     })
     expect(first.status).toBe(201)
     const adminCookie = sessionCookie(first)
+    // Files share one in-memory database, so "first account" may already have
+    // been taken by another test file running alongside this one. Promote
+    // explicitly rather than depend on scheduling; the first-user-is-admin rule
+    // is covered by the isolated setup probe.
+    const adminUser = (await first.json()) as { user: { id: number; role: string } }
+    if (adminUser.user.role !== 'admin') await repo.setUserRole(adminUser.user.id, 'admin')
 
     const second = await post('/api/auth/register', {
       username: 'http_target',

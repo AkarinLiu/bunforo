@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { errMessage, http } from '../api'
 import type { SessionResponse } from '../api'
+import { meta } from '../meta'
 import { auth } from '../store'
 
 const props = defineProps<{ mode: 'login' | 'register' }>()
@@ -16,6 +17,30 @@ const displayName = ref('')
 const password = ref('')
 const error = ref('')
 const submitting = ref(false)
+
+// GitHub redirects back here with a tag instead of a JSON error; map it to text.
+const OAUTH_ERRORS: Record<string, string> = {
+  disabled: '本站未开启 GitHub 登录',
+  denied: '已取消 GitHub 授权',
+  state: '登录状态已失效，请重试',
+  code: 'GitHub 未返回授权码',
+  banned: '该账号已被封禁',
+  mismatch: '该 GitHub 账号与占位账号不匹配',
+  'linked-elsewhere': '该 GitHub 账号已绑定其他账号',
+  'other-email': '该邮箱已归属其他账号',
+  failed: 'GitHub 登录失败，请重试',
+}
+
+const oauthError = computed(() => {
+  const tag = typeof route.query.oauth === 'string' ? route.query.oauth : ''
+  return tag ? OAUTH_ERRORS[tag] || 'GitHub 登录失败，请重试' : ''
+})
+const shownError = computed(() => error.value || oauthError.value)
+
+const githubHref = computed(() => {
+  const next = typeof route.query.next === 'string' ? route.query.next : ''
+  return `/api/auth/github${next ? `?next=${encodeURIComponent(next)}` : ''}`
+})
 
 // Switching between /login and /register keeps what was typed — retyping a
 // username because the user decided to register instead is pure friction.
@@ -58,7 +83,7 @@ async function submit(): Promise<void> {
       {{ isRegister ? '第一个注册的账号会成为管理员。' : '欢迎回来。' }}
     </p>
 
-    <p v-if="error" class="form-error">{{ error }}</p>
+    <p v-if="shownError" class="form-error">{{ shownError }}</p>
 
     <form class="card card-pad" @submit.prevent="submit">
       <label class="field">
@@ -97,6 +122,15 @@ async function submit(): Promise<void> {
       <button class="btn btn-primary" type="submit" style="width: 100%" :disabled="submitting">
         {{ submitting ? '请稍候…' : isRegister ? '创建账号' : '登录' }}
       </button>
+
+      <a
+        v-if="meta.githubOAuth"
+        class="btn btn-ghost"
+        style="width: 100%; margin-top: 10px"
+        :href="githubHref"
+      >
+        使用 GitHub 登录
+      </a>
 
       <p class="muted" style="margin: 16px 0 0; font-size: 14px; text-align: center">
         <template v-if="isRegister">

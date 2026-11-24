@@ -14,9 +14,18 @@ import type { Context, MiddlewareHandler } from 'hono'
 import * as repo from '../db/repo'
 import { SYSTEM_USER_ID, toPublicUser, toSelfUser } from '../shared/types'
 import type { EmailTokenKind, Role } from '../shared/types'
-import { canManage, currentUser, emailBindingRequired, endSession, startSession } from './auth'
+import {
+  canManage,
+  currentUser,
+  emailBindingRequired,
+  endSession,
+  setOauthStateCookie,
+  startSession,
+  takeOauthStateCookie,
+} from './auth'
 import type { AppEnv } from './auth'
 import { sniff } from './filetype'
+import * as github from './github'
 import * as mailer from './mailer'
 import * as storage from './storage'
 
@@ -183,7 +192,7 @@ api.post('/auth/register', async (c) => {
         body: `你好，${displayName}！欢迎来到本站。这是一条来自系统用户的私信，你可以在「私信」里回复。`,
       })
     } catch (err) {
-      console.error('[buntalk] welcome message failed:', err)
+      console.error('[bunforo] welcome message failed:', err)
     }
   }
 
@@ -209,7 +218,7 @@ api.post('/auth/login', async (c) => {
   // wrong password cost the same wall-clock time.
   // `||` not `??`: the system user has an empty hash, and verifying against it
   // would throw instead of the uniform "wrong password" — so it borrows the dummy.
-  const hash = user?.passwordHash || (dummyHash ??= await Bun.password.hash('buntalk-nonexistent-user'))
+  const hash = user?.passwordHash || (dummyHash ??= await Bun.password.hash('bunforo-nonexistent-user'))
   const ok = await Bun.password.verify(password, hash)
   if (!user || !ok) return fail(c, '用户名或密码错误', 401)
   if (user.banned) return fail(c, '该账号已被封禁', 403)
@@ -221,6 +230,67 @@ api.post('/auth/login', async (c) => {
 api.post('/auth/logout', async (c) => {
   await endSession(c)
   return c.json({ ok: true })
+})
+
+/** Only same-site paths: an absolute or protocol-relative `next` is an open redirect. */
+const safeNext = (value: unknown): string => {
+  const next = typeof value === 'string' ? value : ''
+  return next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/api') ? next : '/'
+}
+
+const encodeOauthState = (state: string, next: string): string =>
+  Buffer.from(JSON.stringify({ s: state, n: next })).toString('base64url')
+
+const decodeOauthState = (raw: string): { s: string; n: string } | null => {
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as {
+      s?: unknown
+      n?: unknown
+    }
+    if (typeof parsed.s !== 'string') return null
+    return { s: parsed.s, n: safeNext(parsed.n) }
+  } catch {
+    return null
+  }
+}
+
+api.get('/auth/github', async (c) => {
+  if (!github.oauthConfigured()) return c.redirect('/login?oauth=disabled')
+  const state = github.newState()
+  const next = safeNext(c.req.query('next'))
+  await setOauthStateCookie(c, encodeOauthState(state, next))
+  const redirectUri = github.callbackUrl(new URL(c.req.url).origin)
+  return c.redirect(github.authorizeUrl(state, redirectUri))
+})
+
+/**
+ * The authorisation callback. GitHub redirects the browser here, so failure is
+ * expressed as a query tag the login page can explain — never as JSON, which
+ * would strand the user on a blank API response.
+ */
+api.get('/auth/github/callback', async (c) => {
+  if (!github.oauthConfigured()) return c.redirect('/login?oauth=disabled')
+  const raw = await takeOauthStateCookie(c)
+  const payload = raw ? decodeOauthState(raw) : null
+  const state = c.req.query('state') ?? ''
+  if (!payload || !state || payload.s !== state) return c.redirect('/login?oauth=state')
+  if (c.req.query('error')) return c.redirect('/login?oauth=denied')
+  const code = c.req.query('code') ?? ''
+  if (!code) return c.redirect('/login?oauth=code')
+
+  try {
+    const redirectUri = github.callbackUrl(new URL(c.req.url).origin)
+    const token = await github.exchangeCode(code, redirectUri)
+    const profile = await github.fetchProfile(token)
+    const email = await github.fetchVerifiedEmail(token)
+    const session = await github.resolveGithubAccount({ ...profile, email })
+    await startSession(c, session.userId, session.sessionVersion)
+    return c.redirect(safeNext(payload.n))
+  } catch (err) {
+    const tag = err instanceof github.GithubOauthError ? err.code : 'failed'
+    console.error(`[bunforo] github oauth failed: ${tag}`)
+    return c.redirect(`/login?oauth=${tag}`)
+  }
 })
 
 api.get('/auth/me', (c) => c.json({ user: currentUser(c) }))
@@ -243,12 +313,12 @@ api.post('/auth/forgot-password', async (c) => {
       const code = await issueCode(user.id, 'reset')
       await mailer.sendMail({
         to: email,
-        subject: 'buntalk 密码重置验证码',
+        subject: 'BunForo 密码重置验证码',
         text: `你的密码重置验证码是 ${code}，${CODE_TTL_MS / 60000} 分钟内有效。`,
       })
     } catch (err) {
       // Cooldown or a send failure — stay generic, and never echo account state.
-      console.error('[buntalk] reset mail failed:', err)
+      console.error('[bunforo] reset mail failed:', err)
     }
   }
   return c.json({ ok: true, mailConfigured: true })
@@ -279,7 +349,11 @@ api.post('/auth/reset-password', async (c) => {
 
 /** Public server capabilities the UI keys off — booleans, never secrets. */
 api.get('/meta', (c) =>
-  c.json({ mailConfigured: mailer.mailConfigured(), requireEmail: emailBindingRequired() }),
+  c.json({
+    mailConfigured: mailer.mailConfigured(),
+    requireEmail: emailBindingRequired(),
+    githubOAuth: github.oauthConfigured(),
+  }),
 )
 
 // ------------------------------------------------------------ categories
@@ -466,7 +540,7 @@ api.post('/reports', requireAuth, async (c) => {
 
 // --------------------------------------------------------------- uploads
 
-const UNSUPPORTED_FILE = '仅支持 PNG、JPEG、GIF、WebP、AVIF 图片或 PDF'
+const UNSUPPORTED_FILE = '仅支持 PNG、JPEG、GIF、WebP、AVIF 图片、PDF，或 MP4 / WebM / MOV 视频'
 
 api.post('/uploads', requireAuth, async (c) => {
   let form: Record<string, unknown>
@@ -479,8 +553,10 @@ api.post('/uploads', requireAuth, async (c) => {
   const file = form.file
   if (!(file instanceof File)) return fail(c, '缺少 file 字段')
   if (file.size === 0) return fail(c, '文件为空')
-  if (file.size > storage.maxUploadBytes) {
-    const mb = Math.round(storage.maxUploadBytes / 1024 / 1024)
+  // The largest thing the request parser should ever buffer.
+  const outerLimit = Math.max(storage.maxUploadBytes, storage.maxVideoBytes)
+  if (file.size > outerLimit) {
+    const mb = Math.round(outerLimit / 1024 / 1024)
     return fail(c, `文件不能超过 ${mb} MB`, 413)
   }
 
@@ -490,13 +566,20 @@ api.post('/uploads', requireAuth, async (c) => {
   const kind = sniff(bytes)
   if (!kind) return fail(c, UNSUPPORTED_FILE)
 
+  // Images/PDF keep the small cap; only video gets the larger one.
+  const limit = kind.mime.startsWith('video/') ? storage.maxVideoBytes : storage.maxUploadBytes
+  if (file.size > limit) {
+    const mb = Math.round(limit / 1024 / 1024)
+    return fail(c, `文件不能超过 ${mb} MB`, 413)
+  }
+
   // Random key, server-chosen extension: the client's filename is never used in
   // a path, which removes traversal and extension-confusion in one stroke.
   const key = `${crypto.randomUUID()}.${kind.ext}`
   try {
     await storage.put(key, bytes, kind.mime)
   } catch (err) {
-    console.error('[buntalk] upload failed:', err)
+    console.error('[bunforo] upload failed:', err)
     return fail(c, '上传失败，请稍后重试', 500)
   }
 
@@ -562,11 +645,11 @@ api.post('/users/me/email', requireAuth, async (c) => {
   try {
     await mailer.sendMail({
       to: email,
-      subject: 'buntalk 邮箱验证码',
+      subject: 'BunForo 邮箱验证码',
       text: `你的邮箱验证码是 ${code}，${CODE_TTL_MS / 60000} 分钟内有效。`,
     })
   } catch (err) {
-    console.error('[buntalk] verify mail failed:', err)
+    console.error('[bunforo] verify mail failed:', err)
     await repo.deleteEmailToken(user.id, 'verify')
     return fail(c, '邮件发送失败，请稍后重试', 502)
   }
@@ -1151,11 +1234,11 @@ api.post('/admin/mail-test', async (c) => {
   try {
     await mailer.sendMail({
       to,
-      subject: 'buntalk 测试邮件',
-      text: '这是一封来自 buntalk 的测试邮件。收到它说明 SMTP 配置可用。',
+      subject: 'BunForo 测试邮件',
+      text: '这是一封来自 BunForo 的测试邮件。收到它说明 SMTP 配置可用。',
     })
   } catch (err) {
-    console.error('[buntalk] mail test failed:', err)
+    console.error('[bunforo] mail test failed:', err)
     return fail(c, '发送失败，请检查 SMTP 配置', 502)
   }
   return c.json({ ok: true })

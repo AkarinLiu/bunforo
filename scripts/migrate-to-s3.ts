@@ -1,9 +1,9 @@
 /**
  * Copies every file in UPLOAD_DIR into the configured S3 bucket.
  *
- * Safe to re-run: a PUT is idempotent, so a second run simply re-uploads. Local
- * files are never deleted — verify the bucket, then remove the directory
- * yourself.
+ * Safe to re-run: keys already present in the bucket are skipped (delete an
+ * object first to force it to be uploaded again). Local files are never deleted
+ * — verify the bucket, then remove the directory yourself.
  *
  * Because the public URL of an object is `/uploads/<key>` on every backend, the
  * keys migrate unchanged and no post body has to be rewritten. Point
@@ -14,7 +14,7 @@
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { sniff } from '../src/server/filetype'
-import { driver, exists, isValidKey, put, s3Target, uploadDir } from '../src/server/storage'
+import { driver, exists, isValidKey, listKeys, put, s3Target, uploadDir } from '../src/server/storage'
 
 if (driver !== 's3') {
   console.error(
@@ -33,7 +33,20 @@ if (!names) {
 
 console.log(`[migrate:s3] ${uploadDir} → ${s3Target}`)
 
+// Listing the bucket first makes a resumed migration cheap and avoids
+// re-uploading thousands of already-moved files.
+let existing: Set<string>
+try {
+  existing = await listKeys()
+} catch (err) {
+  console.error(
+    `[migrate:s3] could not list ${s3Target}: ${err instanceof Error ? err.message : String(err)}`,
+  )
+  process.exit(1)
+}
+
 let uploaded = 0
+let already = 0
 let skipped = 0
 let failed = 0
 
@@ -42,6 +55,10 @@ for (const name of names) {
 
   if (!isValidKey(name) || !(await stat(path)).isFile()) {
     skipped++
+    continue
+  }
+  if (existing.has(name)) {
+    already++
     continue
   }
 
@@ -69,7 +86,9 @@ for (const name of names) {
   }
 }
 
-console.log(`\n[migrate:s3] done: ${uploaded} uploaded, ${skipped} skipped, ${failed} failed`)
+console.log(
+  `\n[migrate:s3] done: ${uploaded} uploaded, ${already} already there, ${skipped} skipped, ${failed} failed`,
+)
 if (failed > 0) process.exit(1)
 if (uploaded > 0) {
   console.log('[migrate:s3] set STORAGE_DRIVER=s3 and restart to serve from the bucket.')

@@ -30,6 +30,29 @@ describe('sniff — accepted formats', () => {
     expect(sniff(text('%PDF-1.7'))?.mime).toBe('application/pdf')
   })
 
+  test('identifies MP4, MOV and WebM video from their containers', () => {
+    const ftyp = (brand: string) => {
+      const bytes = new Uint8Array(16)
+      bytes.set([0x66, 0x74, 0x79, 0x70], 4) // ftyp
+      bytes.set([...brand].map((c) => c.charCodeAt(0)), 8)
+      return bytes
+    }
+    expect(sniff(ftyp('isom'))).toEqual({ mime: 'video/mp4', ext: 'mp4' })
+    expect(sniff(ftyp('mp42'))?.ext).toBe('mp4')
+    expect(sniff(ftyp('qt  '))).toEqual({ mime: 'video/quicktime', ext: 'mov' })
+
+    const webm = new Uint8Array(32)
+    webm.set([0x1a, 0x45, 0xdf, 0xa3], 0)
+    webm.set([...'webm'].map((c) => c.charCodeAt(0)), 8)
+    expect(sniff(webm)).toEqual({ mime: 'video/webm', ext: 'webm' })
+
+    // Matroska shares the EBML header but is not WebM.
+    const mkv = new Uint8Array(32)
+    mkv.set([0x1a, 0x45, 0xdf, 0xa3], 0)
+    mkv.set([...'matroska'].map((c) => c.charCodeAt(0)), 8)
+    expect(sniff(mkv)).toBeNull()
+  })
+
   test('reads WebP and AVIF from their inner brand, not just the outer header', () => {
     const webp = new Uint8Array(16)
     webp.set([0x52, 0x49, 0x46, 0x46], 0) // RIFF

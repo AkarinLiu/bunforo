@@ -111,6 +111,8 @@ export interface MetaResponse {
   mailConfigured: boolean
   /** forced email binding is on and effective (needs SMTP) */
   requireEmail: boolean
+  /** a GitHub OAuth app is configured, so the login button will work */
+  githubOAuth: boolean
 }
 export interface EmailBindResponse {
   email: string

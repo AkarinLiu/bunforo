@@ -27,7 +27,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.db-shm
 *.db-wal
 
-# uploaded files (the default local storage backend)
+# uploaded files (current default and the pre-BunForo location)
+public/assets/uploads/
 uploads/
 
 # caches

@@ -12,6 +12,7 @@
  * Drivers are imported lazily, so an SQLite install never loads `pg`/`mysql2`.
  */
 import { DDL } from './ddl'
+import { migrateLegacySqliteFile } from './legacy'
 import type { Dialect } from '../shared/types'
 
 export type { Dialect }
@@ -49,11 +50,16 @@ function detect(url: string): Dialect {
 /** `sqlite:./x.db`, `file:./x.db`, `./x.db` and `:memory:` all reach a path. */
 function sqlitePath(url: string): string {
   const stripped = url.replace(/^sqlite(\+file)?:\/\//i, '').replace(/^file:\/\//i, '')
-  return stripped === '' ? './buntalk.db' : stripped
+  return stripped === '' ? './bunforo.db' : stripped
 }
 
-const url = process.env.DATABASE_URL?.trim() || './buntalk.db'
+// A zero-config install keeps its content across the buntalk → BunForo rename:
+// only an unset DATABASE_URL triggers the legacy-file rename, never an explicit
+// path a deployment pinned on purpose.
+const configured = process.env.DATABASE_URL?.trim() ?? ''
+const url = configured || './bunforo.db'
 const kind = detect(url)
+if (!configured && kind === 'sqlite') migrateLegacySqliteFile()
 
 let db: any
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- see file header
@@ -102,7 +108,7 @@ export async function ensureSchema(): Promise<void> {
     try {
       exec(stmt)
     } catch (err) {
-      console.error(`\n[buntalk] schema statement failed (${kind}):\n${stmt.trim()}\n`)
+      console.error(`\n[bunforo] schema statement failed (${kind}):\n${stmt.trim()}\n`)
       throw err
     }
   }

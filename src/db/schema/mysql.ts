@@ -24,6 +24,8 @@ export const users = mysqlTable('users', {
   email: varchar('email', { length: 254 }).notNull(),
   emailVerified: boolean('email_verified').notNull(),
   sessionVersion: int('session_version').notNull(),
+  githubLogin: varchar('github_login', { length: 191 }),
+  githubId: varchar('github_id', { length: 191 }),
 })
 
 export const emailTokens = mysqlTable('email_tokens', {
@@ -62,6 +64,7 @@ export const threads = mysqlTable('threads', {
   viewCount: int('view_count').notNull(),
   createdAt: varchar('created_at', { length: 40 }).notNull(),
   lastPostAt: varchar('last_post_at', { length: 40 }).notNull(),
+  externalId: varchar('external_id', { length: 191 }),
 })
 
 export const posts = mysqlTable('posts', {
@@ -71,6 +74,7 @@ export const posts = mysqlTable('posts', {
   parentId: int('parent_id'),
   body: text('body').notNull(),
   createdAt: varchar('created_at', { length: 40 }).notNull(),
+  externalId: varchar('external_id', { length: 191 }),
 })
 
 export const postLikes = mysqlTable('post_likes', {
