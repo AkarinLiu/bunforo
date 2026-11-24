@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 阅读使用文档
+    url: https://github.com/AkarinLiu/bunforo#readme
+    about: 安装、配置、S3、邮件、GitHub 导入与已知取舍都写在 README 里
+  - name: 搜索已有 Issue
+    url: https://github.com/AkarinLiu/bunforo/issues?q=is%3Aissue
+    about: 提交前先确认是否已经有人报告过
