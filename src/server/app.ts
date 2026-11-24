@@ -37,7 +37,10 @@ app.use('/uploads/*', async (c, next) => {
 
 if (storage.driver === 's3') {
   app.get('/uploads/*', async (c) => {
-    const key = c.req.param('*') ?? ''
+    // A bare `*` no longer lands in `c.req.param('*')` on Hono 4.13 (both
+    // routers match it anonymously), so read the key off the path instead.
+    // `isValidKey` is still the gate, and it forbids anything needing decoding.
+    const key = c.req.path.slice('/uploads/'.length)
     if (!storage.isValidKey(key)) return c.notFound()
     const target = await storage.publicUrl(key)
     if (!target) return c.notFound()
